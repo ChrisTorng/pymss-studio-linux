@@ -59,6 +59,113 @@ assert.equal(stemSelectionStatements.length, stemSelectionNames.size)
 const stemSelectionCode = ts.transpileModule(stemSelectionStatements.map(statement => statement.getText(script)).join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText
+const outputDirectoryNames = new Set(['outputDirectoryInput', 'outputDirectoryError', 'outputPreview', 'validateOutputDirectory', 'WINDOWS_RESERVED_FILENAMES', 'canStart', 'start'])
+const outputDirectoryStatements = script.statements.filter(statement => (
+  ts.isFunctionDeclaration(statement) ? outputDirectoryNames.has(statement.name?.text)
+    : ts.isVariableStatement(statement) && statement.declarationList.declarations.some(item => outputDirectoryNames.has(item.name.getText(script)))
+))
+assert.equal(outputDirectoryStatements.length, outputDirectoryNames.size)
+const outputDirectoryCode = ts.transpileModule(outputDirectoryStatements.map(statement => statement.getText(script)).join('\n'), {
+  compilerOptions: { target: ts.ScriptTarget.ES2022 },
+}).outputText
+
+test('output directory input prefills Settings, preserves typed spaces, and restores the default when cleared', () => {
+  const temporaryOutputDir = ref('')
+  const settings = { outputDir: 'D:/DefaultOutput' }
+  const normalizedOutputDir = computed(() => temporaryOutputDir.value.trim() || settings.outputDir)
+  const { outputDirectoryInput } = vm.runInNewContext(`${outputDirectoryCode}\n({ outputDirectoryInput })`, {
+    computed, temporaryOutputDir, normalizedOutputDir, outputDirectoryPlatform: ref('windows'), t: key => key,
+  })
+  assert.equal(outputDirectoryInput.value, 'D:/DefaultOutput')
+  assert.equal(temporaryOutputDir.value, '')
+  outputDirectoryInput.value = 'E:/Audio Mix '
+  assert.equal(outputDirectoryInput.value, 'E:/Audio Mix ')
+  assert.equal(normalizedOutputDir.value, 'E:/Audio Mix')
+  settings.outputDir = 'F:/NewDefault'
+  assert.equal(outputDirectoryInput.value, 'E:/Audio Mix ')
+  outputDirectoryInput.value = null
+  assert.equal(temporaryOutputDir.value, '')
+  assert.equal(outputDirectoryInput.value, 'F:/NewDefault')
+})
+
+test('output directory validation checks the effective default when no custom path is entered', () => {
+  const context = {
+    computed, temporaryOutputDir: ref(''), normalizedOutputDir: ref('C:/CON'),
+    outputDirectoryPlatform: ref('windows'), t: key => key,
+  }
+  const { outputDirectoryError } = vm.runInNewContext(`${outputDirectoryCode}\n({ outputDirectoryError })`, context)
+  assert.equal(outputDirectoryError.value, 'separate.outputDirectoryReservedName')
+  context.normalizedOutputDir.value = 'D:/DefaultOutput'
+  assert.equal(outputDirectoryError.value, '')
+})
+
+test('Windows output directories require a drive root or a complete UNC root', () => {
+  const { validateOutputDirectory } = vm.runInNewContext(`${outputDirectoryCode}\n({ validateOutputDirectory })`, {
+    computed, t: key => key,
+  })
+  const separator = String.fromCharCode(92)
+  const accepted = [
+    'D:/Audio/Outputs', 'D:/', 'D:/Audio Mix/结果',
+    `D:${separator}Audio${separator}Outputs`,
+    `${separator}${separator}server${separator}share`,
+    `${separator}${separator}server${separator}share${separator}Outputs`,
+    '//server/share/Outputs',
+  ]
+  for (const path of accepted) assert.equal(validateOutputDirectory(path, 'windows'), '', path)
+  for (const path of ['111', 'results/audio', '/Audio/Outputs', `${separator}Audio`, `${separator}${separator}server${separator}`]) {
+    assert.equal(validateOutputDirectory(path, 'windows'), 'separate.outputDirectoryAbsoluteRequired', path)
+  }
+  for (const path of ['D:', 'D:Outputs', `${separator}${separator}server`]) {
+    assert.ok(validateOutputDirectory(path, 'windows'), path)
+  }
+})
+
+test('macOS and Linux output directories require a filesystem root', () => {
+  const { validateOutputDirectory } = vm.runInNewContext(`${outputDirectoryCode}\n({ validateOutputDirectory })`, {
+    computed, t: key => key,
+  })
+  for (const platform of ['macos', 'linux']) {
+    for (const path of ['/', '/home/user/Audio Mix', '/Volumes/Audio/结果']) {
+      assert.equal(validateOutputDirectory(path, platform), '', `${platform}: ${path}`)
+    }
+    for (const path of ['111', './results', '../results', '~/results', 'D:/Outputs']) {
+      assert.equal(validateOutputDirectory(path, platform), 'separate.outputDirectoryAbsoluteRequired', `${platform}: ${path}`)
+    }
+  }
+})
+
+test('a relative output directory disables submission and blocks the start action', async () => {
+  const warnings = []
+  const context = {
+    computed, temporaryOutputDir: ref('111'), normalizedOutputDir: ref('111'),
+    outputDirectoryPlatform: ref('windows'), t: key => key,
+    submittingJob: ref(false), workflowStructureInvalid: ref(false), runMode: ref('model'),
+    ensembleEnabled: ref(false), modelDownloaded: ref(true), inputFiles: ref(['D:/Audio/song.wav']),
+    hasOutputStemSelection: ref(true), message: { warning: value => warnings.push(value) },
+  }
+  const { canStart, start } = vm.runInNewContext(`${outputDirectoryCode}\n({ canStart, start })`, context)
+  assert.equal(canStart.value, false)
+  await start()
+  assert.deepEqual(warnings, ['separate.outputDirectoryAbsoluteRequired'])
+  context.normalizedOutputDir.value = 'D:/Outputs'
+  assert.equal(canStart.value, true)
+})
+
+test('output previews preserve literal POSIX backslashes and Windows separators', () => {
+  const separator = String.fromCharCode(92)
+  const context = {
+    computed, normalizedOutputDir: ref(`/tmp/results${separator}`), outputDirectoryPlatform: ref('linux'),
+    effectiveOutputLayout: ref('folders'), outputNamingPreviewFiles: ref(['vocals.wav']),
+    t: key => key === 'separate.resultFolderPreview' ? 'song' : key,
+  }
+  const { outputPreview } = vm.runInNewContext(`${outputDirectoryCode}\n({ outputPreview })`, context)
+  assert.equal(outputPreview.value, `/tmp/results${separator}/song/vocals.wav`)
+  context.effectiveOutputLayout.value = 'flat'
+  assert.equal(outputPreview.value, `/tmp/results${separator}/vocals.wav`)
+  context.outputDirectoryPlatform.value = 'windows'
+  context.normalizedOutputDir.value = `E:${separator}Results${separator}`
+  assert.equal(outputPreview.value, `E:${separator}Results${separator}vocals.wav`)
+})
 
 function computed(source) {
   if (typeof source === 'function') return { get value() { return source() } }

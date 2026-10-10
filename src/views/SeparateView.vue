@@ -69,6 +69,7 @@ const {
   ensembleType,
   ensembleWeights,
   separateTemporaryOutputDir: temporaryOutputDir,
+  separateOutputDir: normalizedOutputDir,
   separateOutputLayout: outputLayout,
   separateOutputNamingTemplate: outputNamingTemplate,
   separateCustomStemOrder: customStemOrder,
@@ -674,7 +675,10 @@ const filteredWorkflows = computed(() => {
     .sort((a, b) => b.updatedAt - a.updatedAt)
 })
 
-const normalizedOutputDir = computed(() => (temporaryOutputDir.value || settings.outputDir || 'results').trim() || 'results')
+const outputDirectoryInput = computed({
+  get: () => temporaryOutputDir.value || normalizedOutputDir.value,
+  set: (value: string | null) => { temporaryOutputDir.value = value || '' },
+})
 const outputDirectoryPlatform = computed(() => {
   const reported = String(app.envInfo?.platform || '').trim().toLowerCase()
   if (reported === 'win32' || reported === 'windows') return 'windows' as const
@@ -685,10 +689,11 @@ const outputDirectoryPlatform = computed(() => {
   if (browserPlatform.includes('mac')) return 'macos' as const
   return 'linux' as const
 })
-const outputDirectoryError = computed(() => validateOutputDirectory(temporaryOutputDir.value, outputDirectoryPlatform.value))
+const outputDirectoryError = computed(() => validateOutputDirectory(normalizedOutputDir.value, outputDirectoryPlatform.value))
 const outputPreview = computed(() => {
-  const base = normalizedOutputDir.value.replace(/[\\/]$/, '')
-  const separator = base.includes('\\') ? '\\' : '/'
+  const windows = outputDirectoryPlatform.value === 'windows'
+  const base = normalizedOutputDir.value.replace(windows ? /[\\/]$/ : /[/]$/, '')
+  const separator = windows && base.includes('\\') ? '\\' : '/'
   const previewName = outputNamingPreviewFiles.value[0] || t('separate.outputFilePreview')
   if (effectiveOutputLayout.value === 'flat') {
     return `${base}${separator}${previewName}`
@@ -1034,7 +1039,7 @@ function validateOutputDirectory(value: string, platform: 'windows' | 'macos' | 
 
   if (platform !== 'windows') {
     if (path.includes('\0')) return t('separate.outputDirectoryInvalidCharacters')
-    return ''
+    return path.startsWith('/') ? '' : t('separate.outputDirectoryAbsoluteRequired')
   }
 
   if (/[<>"|?*]/u.test(path)) return t('separate.outputDirectoryInvalidCharacters')
@@ -1051,7 +1056,8 @@ function validateOutputDirectory(value: string, platform: 'windows' | 'macos' | 
     return t('separate.outputDirectoryReservedName')
   }
   if (/^[A-Za-z]:$/u.test(path) || /^\\\\[^\\]+$/u.test(path)) return t('separate.outputDirectoryIncomplete')
-  return ''
+  const isAbsolute = /^[A-Za-z]:\\/u.test(normalized) || /^\\\\[^\\]+\\[^\\]+(?:\\|$)/u.test(normalized)
+  return isAbsolute ? '' : t('separate.outputDirectoryAbsoluteRequired')
 }
 
 function stripFileExtension(path: string) {
@@ -2108,7 +2114,7 @@ async function retryCurrentTask() {
             <label class="ofield">
               <span class="ofield__label">{{ t('separate.temporaryOutputDir') }}</span>
               <div class="dir-input">
-                <n-input v-model:value="temporaryOutputDir" size="small" :status="outputDirectoryError ? 'error' : undefined" :placeholder="settings.outputDir || t('separate.outputDefault')" :disabled="isRunModeLocked" clearable />
+                <n-input v-model:value="outputDirectoryInput" size="small" :status="outputDirectoryError ? 'error' : undefined" :placeholder="t('separate.outputDefault')" :disabled="isRunModeLocked" clearable />
                 <n-button secondary size="small" class="dir-input__browse" :title="t('separate.chooseOutput')" :disabled="isRunModeLocked" @click="pickTemporaryOutputDir">
                   <template #icon><n-icon :component="FolderOutline" /></template>
                 </n-button>

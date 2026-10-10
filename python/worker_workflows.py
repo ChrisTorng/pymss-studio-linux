@@ -29,11 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from worker_protocol import emit, emit_error
-
-
-def _normalize_output_dir(value: Any) -> str:
-    text = str(value or "").strip()
-    return text or "results"
+from worker_paths import normalize_output_dir as _normalize_output_dir
 
 
 def _normalize_output_layout(value: Any) -> str:
@@ -1204,7 +1200,7 @@ def cmd_infer_workflow(payload: dict[str, Any]) -> int:
         result = _run_pymss(payload, task_id, input_path=input_path or None, inputs=inputs or None,
                             output_dir=output_dir, output_layout=output_layout)
         emit("task_stage", {"stage": "writing_output", "message": "Collecting workflow outputs", "progress": 92}, task_id=task_id)
-        emit("task_done", result, task_id=task_id)
+        emit("task_done", {**result, "outputRoot": output_dir}, task_id=task_id)
         return 0
     except Exception as exc:
         return emit_error("WORKFLOW_RUN_FAILED", str(exc), traceback.format_exc(), task_id=task_id)
@@ -1250,7 +1246,7 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
                                     inputs=item_inputs or None,
                                     output_dir=output_dir, output_layout=output_layout)
                 emit("task_stage", {"stage": "writing_output", "message": "Collecting workflow outputs", "progress": 92}, task_id=task_id)
-                emit("task_done", result, task_id=task_id)
+                emit("task_done", {**result, "outputRoot": output_dir}, task_id=task_id)
             except Exception as exc:
                 failed = True
                 emit_error("WORKFLOW_RUN_FAILED", str(exc), traceback.format_exc(), task_id=task_id)

@@ -143,7 +143,6 @@ type PersistedSeparateState = {
   ensembleModelStems?: Record<string, string>
   ensembleType?: string
   ensembleWeights?: Record<string, number>
-  temporaryOutputDir?: string
   outputLayout?: OutputLayout
   outputNamingTemplate?: string
   customStemOrder?: string[]
@@ -234,6 +233,10 @@ function normalizeOutputPath(value?: string | null) {
   return value && value.trim() ? value : 'outputs'
 }
 
+function resolveOutputDirectory(value?: string | null, fallback?: string | null) {
+  return value?.trim() || fallback?.trim() || 'outputs'
+}
+
 function normalizeTimestamp(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
 }
@@ -242,22 +245,22 @@ function normalizeDurationMs(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.max(0, Math.round(value)) : undefined
 }
 
-function joinOutputPath(base: string, child: string) {
-  const separator = base.includes('\\') ? '\\' : '/'
-  return `${base.replace(/[\\/]$/, '')}${separator}${child}`
+function joinOutputPath(base: string, child: string, windows: boolean) {
+  const separator = windows && base.includes('\\') ? '\\' : '/'
+  const trailingSeparator = windows ? /[\\/]$/ : /[/]$/
+  return `${base.replace(trailingSeparator, '')}${separator}${child}`
 }
 
 function createRunId(prefix: string) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
 }
 
-function inputStemSegment(input: string, fallback: string) {
+function inputStemSegment(input: string, fallback: string, windows: boolean) {
   return input
-    .split(/[/\\]/)
+    .split(windows ? /[/\\]/ : /[/]/)
     .filter(Boolean)
     .pop()
-    ?.replace(/\.[^/.\\]+$/, '')
-    .trim() || fallback
+    ?.replace(windows ? /\.[^/.\\]+$/ : /\.[^/.]+$/, '') || fallback
 }
 
 function outputsFromFiles(outputDir: string, files: string[], outputFormat = 'wav', outputPrefix?: string, inputPath?: string): StemOutput[] {
@@ -553,7 +556,15 @@ export const useTaskStore = defineStore('task', () => {
   const ensembleModelStems = ref<Record<string, string>>({})
   const ensembleType = ref('avg_wave')
   const ensembleWeights = ref<Record<string, number>>({})
+  // Retain directory overrides across route changes, but inherit Settings after restarting.
   const separateTemporaryOutputDir = ref('')
+  const separateOutputDir = computed(() => resolveOutputDirectory(separateTemporaryOutputDir.value, useSettingsStore().outputDir))
+  const windowsPaths = computed(() => {
+    const app = useAppStore()
+    const platform = app.envInfo?.platform || app.runtimeInfo?.platform
+      || (typeof navigator !== 'undefined' ? navigator.platform : '')
+    return /^win/i.test(platform)
+  })
   const separateOutputLayout = ref<OutputLayout>('flat')
   const separateOutputNamingTemplate = ref('%index%_%filename%_%stem%')
   const separateCustomStemOrder = ref<string[]>([])
@@ -611,7 +622,6 @@ export const useTaskStore = defineStore('task', () => {
       ensembleModelStems: { ...ensembleModelStems.value },
       ensembleType: ensembleType.value,
       ensembleWeights: { ...ensembleWeights.value },
-      temporaryOutputDir: separateTemporaryOutputDir.value,
       outputLayout: separateOutputLayout.value,
       outputNamingTemplate: separateOutputNamingTemplate.value,
       customStemOrder: [...separateCustomStemOrder.value],
@@ -781,7 +791,6 @@ export const useTaskStore = defineStore('task', () => {
         return Number.isFinite(weight) && weight >= 0 ? [[name, weight]] : []
       }),
     )
-    separateTemporaryOutputDir.value = String(separateStored?.temporaryOutputDir || '')
     separateOutputLayout.value = normalizeOutputLayout(separateStored?.outputLayout)
     separateOutputNamingTemplate.value = String(separateStored?.outputNamingTemplate || '%index%_%filename%_%stem%')
     separateCustomStemOrder.value = Array.isArray(separateStored?.customStemOrder)
@@ -807,7 +816,7 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   watch(
-    [separateRunMode, ensembleEnabled, ensembleModels, ensembleStem, ensembleModelStems, ensembleType, ensembleWeights, separateTemporaryOutputDir,
+    [separateRunMode, ensembleEnabled, ensembleModels, ensembleStem, ensembleModelStems, ensembleType, ensembleWeights,
       separateOutputLayout, separateOutputNamingTemplate, separateCustomStemOrder, modelListViewMode, modelListSortMode, modelListPageSize, useTta],
     () => {
       if (applyingModelDefaults) return
@@ -1072,14 +1081,14 @@ export const useTaskStore = defineStore('task', () => {
   function resolveTaskOutputPath(jobOutput: string, input: string, resultId: string, outputLayout: OutputLayout) {
     return outputLayout === 'flat'
       ? jobOutput
-      : joinOutputPath(jobOutput, inputStemSegment(input, resultId))
+      : joinOutputPath(jobOutput, inputStemSegment(input, resultId, windowsPaths.value), windowsPaths.value)
   }
 
   function createQueuedTask(input: string, model: string, inferenceParams: Record<string, unknown>, modelType?: string | null, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig) {
     const settings = useSettingsStore()
     const id = createRunId('sep')
     const resultId = createRunId('result')
-    const resolvedJobOutput = jobOutput || normalizeOutputPath(settings.outputDir)
+    const resolvedJobOutput = jobOutput || resolveOutputDirectory(settings.outputDir)
     const task: SeparationTask = {
       id,
       jobId,
@@ -1110,7 +1119,7 @@ export const useTaskStore = defineStore('task', () => {
     const settings = useSettingsStore()
     const id = createRunId('wf')
     const resultId = createRunId('result')
-    const resolvedJobOutput = jobOutput || normalizeOutputPath(settings.outputDir)
+    const resolvedJobOutput = jobOutput || resolveOutputDirectory(settings.outputDir)
     const task: SeparationTask = {
       id,
       jobId,
@@ -1440,7 +1449,11 @@ export const useTaskStore = defineStore('task', () => {
       task.files = event.payload?.files || []
       if (event.payload?.outputDir) {
         task.output = event.payload.outputDir
-        if (task.runConfig?.outputLayout === 'flat') task.jobOutput = event.payload.outputDir
+      }
+      if (typeof event.payload?.outputRoot === 'string' && event.payload.outputRoot) {
+        task.jobOutput = event.payload.outputRoot
+      } else if (task.runConfig?.outputLayout === 'flat' && event.payload?.outputDir) {
+        task.jobOutput = event.payload.outputDir
       }
       const normalizedOutputs = normalizeStemOutputs(event.payload?.outputs, task.input)
       task.outputs = normalizedOutputs.length
@@ -1906,9 +1919,8 @@ export const useTaskStore = defineStore('task', () => {
     const inferenceParams = buildInferenceParams(modelType)
     const targets = [...inputFiles.value]
     const jobId = createRunId('job')
-    const settings = useSettingsStore()
     const outputLayout = normalizeOutputLayout(options.outputLayout)
-    const jobOutput = normalizeOutputPath(options.outputDir || settings.outputDir)
+    const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value)
     const outputNaming = normalizeOutputNaming(options.outputNaming)
     const createdTasks = targets.map(input => submitOne(
       input,
@@ -1940,14 +1952,13 @@ export const useTaskStore = defineStore('task', () => {
     }
     const validationError = workflowDefinitionValidationError(workflow.definition)
     if (validationError) throw new Error(validationError)
-    const settings = useSettingsStore()
     const targets = [...inputFiles.value]
     if (!targets.length) {
       throw new Error(i18n.global.t('separate.startHintNoInput'))
     }
     const jobId = createRunId('job')
     const outputLayout = normalizeOutputLayout(options.outputLayout)
-    const jobOutput = normalizeOutputPath(options.outputDir || settings.outputDir)
+    const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value)
     const outputNaming = normalizeOutputNaming(options.outputNaming)
     const createdTasks = targets.map(input => createQueuedWorkflowTask(
       input,
@@ -1963,6 +1974,26 @@ export const useTaskStore = defineStore('task', () => {
   async function retryTask(taskId: string) {
     const existing = tasks.value.find((t) => t.id === taskId)
     if (!existing) return
+    const outputLayout = normalizeOutputLayout(existing.runConfig?.outputLayout)
+    const windows = windowsPaths.value
+    const isAbsolute = (path: string) => windows ? /^(?:[A-Za-z]:[/\\]|[/\\]{2})/.test(path) : path.startsWith('/')
+    let jobOutput = existing.jobOutput
+    if (!jobOutput || !isAbsolute(jobOutput)) {
+      const output = existing.output
+      if (!isAbsolute(output)) throw new Error(i18n.global.t('separate.retryOutputDirectoryUnknown'))
+      if (outputLayout === 'folders') {
+        const folderName = output.split(windows ? /[/\\]/ : /[/]/).filter(Boolean).pop()
+        const inputName = inputStemSegment(existing.input, existing.resultId || existing.id, windows)
+        const matchesInput = windows ? folderName?.toLowerCase() === inputName.toLowerCase() : folderName === inputName
+        if (!matchesInput) throw new Error(i18n.global.t('separate.retryOutputDirectoryUnknown'))
+        jobOutput = output.replace(windows ? /[^/\\]+[/\\]*$/ : /[^/]+[/]*$/, '')
+        if (jobOutput.length > 1 && !(windows && /^[A-Za-z]:[/\\]$/.test(jobOutput))) {
+          jobOutput = jobOutput.replace(windows ? /[/\\]$/ : /[/]$/, '')
+        }
+      } else {
+        jobOutput = output
+      }
+    }
     if (existing.runConfig?.runMode === 'workflow' && existing.runConfig.workflowId && existing.runConfig.workflowName && existing.runConfig.workflowDefinition) {
       const task = createQueuedWorkflowTask(existing.input, {
         id: existing.runConfig.workflowId,
@@ -1973,7 +2004,7 @@ export const useTaskStore = defineStore('task', () => {
         formatVersion: WORKFLOW_FORMAT_VERSION,
         createdAt: existing.createdAt,
         updatedAt: existing.updatedAt,
-      }, undefined, undefined, existing.runConfig.outputLayout, existing.runConfig.outputNaming)
+      }, undefined, jobOutput, outputLayout, existing.runConfig.outputNaming)
       scheduleQueue()
       return task
     }
@@ -1983,7 +2014,7 @@ export const useTaskStore = defineStore('task', () => {
     const persistedModelType = existing.runConfig?.modelType ?? null
     const modelEntry = modelStore.models.find((item) => item.name === existing.model) || null
     const modelType = modelEntry?.modelType || persistedModelType || null
-    const task = createQueuedTask(existing.input, existing.model, retryParams, modelType, undefined, undefined, existing.runConfig?.outputLayout, existing.runConfig?.outputNaming)
+    const task = createQueuedTask(existing.input, existing.model, retryParams, modelType, undefined, jobOutput, outputLayout, existing.runConfig?.outputNaming)
     scheduleQueue()
     return task
   }
@@ -2015,6 +2046,7 @@ export const useTaskStore = defineStore('task', () => {
     ensembleType,
     ensembleWeights,
     separateTemporaryOutputDir,
+    separateOutputDir,
     separateOutputLayout,
     separateOutputNamingTemplate,
     separateCustomStemOrder,

@@ -21,6 +21,7 @@ from worker_models import (
 )
 from worker_protocol import _as_bool, _as_float, _as_int, emit, emit_error
 from worker_inference_constraints import InferenceParameterError, validate_chunk_size
+from worker_paths import normalize_output_dir as _normalize_output_dir
 
 
 class ModelNotFoundError(RuntimeError):
@@ -376,14 +377,6 @@ def _close_separator(separator: Any) -> None:
             pass
 
 
-def _normalize_output_dir(value: Any) -> str:
-    default_output_dir = os.environ.get("PYMSS_STUDIO_DEFAULT_OUTPUT_DIR")
-    output_dir = value or default_output_dir or "results"
-    output_path = Path(str(output_dir))
-    if not output_path.is_absolute() and default_output_dir:
-        return str(Path(default_output_dir).parent / output_path)
-    return str(output_dir)
-
 def _normalize_selected_stems(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -563,7 +556,7 @@ def _prepare_separator(
         device_ids=device_ids,
         output_format=output_format,
         use_tta=use_tta,
-        store_dirs=_store_dirs_for_selected_stems(_normalize_output_dir(payload.get("output")), selected_stems),
+        store_dirs=_store_dirs_for_selected_stems(str(payload["output"]), selected_stems),
         save_as_folder=bool(payload.get("saveAsFolder", False)),
         audio_params=audio_params,
         logger=logger,
@@ -832,6 +825,7 @@ def cmd_infer_batch(payload: dict[str, Any]) -> int:
                 "files": [output["path"] for output in outputs],
                 "outputs": outputs,
                 "outputDir": str(Path(task_output).resolve()),
+                "outputRoot": output_root,
                 "outputFormat": output_format,
             }, task_id=task_id)
             terminal_task_ids.add(task_id)
@@ -858,11 +852,7 @@ def cmd_infer(payload: dict[str, Any]) -> int:
     task_id = payload.get("taskId") or f"sep_{int(datetime.now().timestamp())}"
     model_name = payload.get("model")
     input_path = payload.get("input")
-    default_output_dir = os.environ.get("PYMSS_STUDIO_DEFAULT_OUTPUT_DIR")
-    output_dir = payload.get("output") or default_output_dir or "results"
-    output_path = Path(output_dir)
-    if not output_path.is_absolute() and default_output_dir:
-        output_dir = str(Path(default_output_dir).parent / output_path)
+    output_dir = _normalize_output_dir(payload.get("output"))
     if not model_name:
         return emit_error("MODEL_NOT_FOUND", "Missing model name", task_id=task_id)
     if not input_path:
@@ -940,7 +930,7 @@ def cmd_infer(payload: dict[str, Any]) -> int:
         emit("task_stage", {"stage": "writing_output", "message": "Collecting outputs"}, task_id=task_id)
         task_output = resolve_pymss_output_dir(output_dir, success_files, input_path, save_as_folder)
         outputs = separator.studio_outputs()
-        emit("task_done", {"files": [output["path"] for output in outputs], "outputs": outputs, "outputDir": str(Path(task_output).resolve()), "outputFormat": output_format}, task_id=task_id)
+        emit("task_done", {"files": [output["path"] for output in outputs], "outputs": outputs, "outputDir": str(Path(task_output).resolve()), "outputRoot": output_dir, "outputFormat": output_format}, task_id=task_id)
         return 0
     except ModelNotFoundError as exc:
         return emit_error("MODEL_NOT_FOUND", str(exc), traceback.format_exc(), task_id=task_id)
