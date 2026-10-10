@@ -219,6 +219,7 @@ async function persist(force = false) {
       expectedUpdatedAt: force ? undefined : expectedUpdatedAt.value,
       force,
     })
+    workbench.adoptWorkflowKey(entry.id)
     editingId.value = entry.id
     expectedUpdatedAt.value = entry.updatedAt
     initialSnapshot.value = savedSnapshot
@@ -308,14 +309,6 @@ async function saveAndClose() {
 }
 
 async function runWorkflow() {
-  if (isStandaloneWindow.value && currentWindow) {
-    const bindings = JSON.parse(JSON.stringify(workbench.session.value.bindings))
-    const entry = await persist()
-    if (!entry) return
-    await currentWindow.emit('pymss://workflow-simple-editor-action', { action: 'run', workflowId: entry.id, bindings })
-    await destroyWindow()
-    return
-  }
   await workbench.run()
 }
 
@@ -426,7 +419,7 @@ onBeforeUnmount(() => {
       </n-result>
     </div>
     <template v-if="loaded">
-      <div class="workbench-header"><n-button size="small" @click="closeEditor">{{ t('workflows.returnToWorkflows') }}</n-button></div>
+      <div v-if="!isStandaloneWindow" class="workbench-header"><n-button size="small" @click="closeEditor">{{ t('workflows.returnToWorkflows') }}</n-button></div>
       <WorkflowRunPanel :workflow-key="workflowKey" :definition="currentDefinition" v-model:view-mode="viewMode" v-model:job-id="selectedJobId" :submitting="submitting" :dirty="dirty" @run="runWorkflow" @cancel="workbench.cancel" />
       <WorkflowSimpleNodeEditor v-if="viewMode === 'execution' && executionDefinition"
         :key="'execution-' + selectedJobId" :draft="executionDraft" :name="executionName" :description="''"

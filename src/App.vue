@@ -49,8 +49,7 @@ const workflowEventUnlisteners: UnlistenFn[] = []
 let unmounted = false
 
 const isDark = computed(() => themeIsDark.value)
-const isAuxiliaryWindow = !isMainTaskOwner()
-const isStandaloneRoute = computed(() => route.path === '/editor' || (isAuxiliaryWindow && (route.path === '/workflow-node-editor' || route.path === '/workflow-simple-editor')))
+const isStandaloneRoute = computed(() => route.path === '/editor' || route.path === '/workflow-node-editor' || route.path === '/workflow-simple-editor')
 const isWorkflowNodeEditorRoute = computed(() => route.path === '/workflow-node-editor')
 const isWorkflowSimpleEditorRoute = computed(() => route.path === '/workflow-simple-editor')
 const isWorkflowEditorRoute = computed(() => isWorkflowNodeEditorRoute.value || isWorkflowSimpleEditorRoute.value)
@@ -249,9 +248,9 @@ async function keepDeferredUpdateForNextLaunch() {
 }
 
 async function listenForMainWorkflowEvent<T>(event: string, handler: EventCallback<T>) {
-  if (unmounted || isStandaloneRoute.value) return
+  if (unmounted || !isMainTaskOwner() || isStandaloneRoute.value) return
   const unlisten = await listen<T>(event, (payload) => {
-    if (!unmounted && !isStandaloneRoute.value) handler(payload)
+    if (!unmounted && isMainTaskOwner() && !isStandaloneRoute.value) handler(payload)
   })
   if (unmounted) unlisten()
   else workflowEventUnlisteners.push(unlisten)
@@ -297,7 +296,7 @@ onMounted(async () => {
             session.viewMode = 'execution'
           } catch (error) { useToastStore().error(error instanceof Error ? error.message : String(error)) }
         }
-        void router.push({ path: workflow.selectedWorkflow?.format === 'simple' ? '/workflow-simple-editor' : '/workflow-node-editor', query: { workflowId: payload.workflowId } })
+
       }
     })
   }

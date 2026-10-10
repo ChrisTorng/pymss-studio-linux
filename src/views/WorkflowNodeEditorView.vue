@@ -135,14 +135,6 @@ const workbench = useWorkflowWorkbench({ workflowKey, definition: () => definiti
 const { viewMode, selectedJobId, executionDefinition, executionNodeSummaries, nodeStates, nodeSummaries, submitting } = workbench
 async function runWorkflow() {
   syncCurrentDefinition()
-  if (isStandaloneWindow.value && currentWindow) {
-    const bindings = JSON.parse(JSON.stringify(workbench.session.value.bindings))
-    const entry = await save()
-    if (!entry) return
-    await currentWindow.emit('pymss://workflow-simple-editor-action', { action: 'run', workflowId: entry.id, bindings })
-    await destroyWindow()
-    return
-  }
   await workbench.run()
 }
 const executionGraph = computed(() => cloneWorkflow(executionDefinition.value || {}))
@@ -229,6 +221,7 @@ async function persistDefinition(
       expectedUpdatedAt: options.saveCopy ? undefined : loadedUpdatedAt.value,
       force: options.force,
     })
+    workbench.adoptWorkflowKey(entry.id)
     pendingDefinition.value = null
     showRevisionConflict.value = false
     if (snapshot() === savedSnapshot) {
@@ -470,7 +463,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="config-grid">
-        <n-button size="small" @click="closeEditor">{{ t('workflows.returnToWorkflows') }}</n-button>
+        <n-button v-if="!isStandaloneWindow" size="small" @click="closeEditor">{{ t('workflows.returnToWorkflows') }}</n-button>
         <label class="config-field">
           <span>{{ t('workflows.defaultDevice') }}</span>
           <n-select v-model:value="defaultDevice" size="small" :options="deviceOptions" />

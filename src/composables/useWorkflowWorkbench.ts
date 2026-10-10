@@ -7,6 +7,8 @@ import { useWorkbenchStore } from '@/stores/workbench'
 import { useTaskStore } from '@/stores/task'
 import { useSettingsStore } from '@/stores/settings'
 import type { WorkflowEntry } from '@/stores/workflow'
+import { isMainTaskOwner } from '@/utils/taskOwner'
+import { initializeWorkbenchBridge, requestWorkbenchAction } from '@/utils/workbenchBridge'
 import { cloneWorkflow, prepareWorkbenchRun, visibleWorkflowNodeId, workbenchOutputDirectory, workflowInputNodes, workflowOutputNodes, type WorkflowNodeState } from '@/workflows/workbench'
 
 export function useWorkflowWorkbench(options: {
@@ -23,7 +25,9 @@ export function useWorkflowWorkbench(options: {
   const session = computed(() => store.session(options.workflowKey.value))
   const viewMode = computed({ get: () => session.value.viewMode, set: value => { session.value.viewMode = value } })
   const selectedJobId = computed({ get: () => session.value.selectedJobId, set: value => { session.value.selectedJobId = value } })
-  const focusedJob = computed(() => tasks.allJobs.find(job => job.id === selectedJobId.value) || null)
+  const owner = isMainTaskOwner()
+  const jobs = computed(() => owner ? tasks.allJobs : store.remoteJobs[options.workflowKey.value] || [])
+  const focusedJob = computed(() => jobs.value.find(job => job.id === selectedJobId.value) || null)
   const focusedTask = computed(() => focusedJob.value?.tasks.find(task => task.id === session.value.selectedTaskId)
     || focusedJob.value?.tasks.find(task => task.status === 'separating')
     || focusedJob.value?.tasks.find(task => !['done', 'failed', 'cancelled'].includes(task.status))
@@ -76,9 +80,34 @@ export function useWorkflowWorkbench(options: {
     for (const key of Object.keys(session.value.bindings.outputs)) if (!outputs.has(key)) delete session.value.bindings.outputs[key]
   })
   let unlistenDrop: (() => void) | undefined
+  const stopRemoteWatches: (() => void)[] = []
+  let remoteReady = false
+  let adoptedKey = ''
   let disposed = false
   onMounted(async () => {
     if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return
+    if (!owner) {
+      try {
+        const connected = await initializeWorkbenchBridge()
+        if (!connected || disposed) return
+        stopRemoteWatches.push(watch(options.workflowKey, async (key, previous) => {
+          remoteReady = false
+          try {
+            if (adoptedKey === key) {
+              adoptedKey = ''
+              await connected.remember(key, cloneWorkflow(store.session(key)))
+            } else if (previous && store.sessions[previous]) {
+              await connected.remember(previous, cloneWorkflow(store.session(previous)))
+            }
+            await connected.attach(key)
+            if (!disposed && options.workflowKey.value === key) remoteReady = true
+          } catch (error) { if (!disposed) message.error(String(error)) }
+        }, { immediate: true }))
+        stopRemoteWatches.push(watch(() => session.value, value => {
+          if (remoteReady && !disposed) void connected.remember(options.workflowKey.value, cloneWorkflow(value)).catch(error => message.error(String(error)))
+        }, { deep: true }))
+      } catch (error) { message.error(String(error)) }
+    }
     try {
       const remove = await getCurrentWebview().onDragDropEvent(async event => {
         if (event.payload.type !== 'drop' || viewMode.value !== 'edit') return
@@ -98,8 +127,12 @@ export function useWorkflowWorkbench(options: {
       else unlistenDrop = remove
     } catch { /* Browser previews and older webviews use the explicit file controls. */ }
   })
-  onBeforeUnmount(() => { disposed = true; unlistenDrop?.() })
-  function adoptWorkflowKey(key: string) { store.adopt(options.workflowKey.value, key) }
+  onBeforeUnmount(() => { disposed = true; unlistenDrop?.(); stopRemoteWatches.splice(0).forEach(stop => stop()) })
+  function adoptWorkflowKey(key: string) {
+    if (key === options.workflowKey.value) return
+    store.adopt(options.workflowKey.value, key)
+    adoptedKey = key
+  }
   async function run() {
     if (submitting.value) return
     submitting.value = true
@@ -110,19 +143,31 @@ export function useWorkflowWorkbench(options: {
       const entry = await options.save()
       if (!entry) return
       store.adopt(originalKey, entry.id)
-      const result = await tasks.startWorkbenchInference(entry, bindings)
+      let result: { jobId?: string; total?: number }
+      if (owner) result = await tasks.startWorkbenchInference(entry, bindings)
+      else {
+        const connected = await initializeWorkbenchBridge()
+        if (!connected) throw new Error('workbench.hostUnavailable')
+        await connected.remember(entry.id, cloneWorkflow(store.session(entry.id)))
+        await connected.attach(entry.id)
+        result = await requestWorkbenchAction({ action: 'run', workflowKey: entry.id, entry: cloneWorkflow(entry), bindings })
+      }
       const target = store.session(entry.id)
-      target.selectedJobId = result.jobId
+      target.selectedJobId = result.jobId || ''
       target.selectedTaskId = ''
       target.viewMode = 'execution'
       message.success(t('workbench.submitted', { count: result.total }))
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error)
-      message.error(text.startsWith('workbench.') ? t(text) : text)
+      message.error(/^(workbench|workflows)\./.test(text) ? t(text) : text)
     } finally { submitting.value = false }
   }
   async function cancel() {
-    if (focusedJob.value) await tasks.cancelWorkbenchJob(focusedJob.value.id).catch(error => message.error(String(error)))
+    if (!focusedJob.value) return
+    try {
+      if (owner) await tasks.cancelWorkbenchJob(focusedJob.value.id)
+      else await requestWorkbenchAction({ action: 'cancel', workflowKey: options.workflowKey.value, jobId: focusedJob.value.id })
+    } catch (error) { message.error(String(error)) }
   }
   return { session, viewMode, selectedJobId, focusedJob, focusedTask, executionDefinition, executionNodeSummaries, nodeStates, nodeSummaries, running, submitting, run, cancel, adoptWorkflowKey }
 }

@@ -1915,7 +1915,8 @@
     "moreActions": "More actions",
     "metricLinks": "Links",
     "inputSlots": "Runtime input slots",
-    "comfyReadOnlyHint": "Advanced (comfy) workflows are free-form; this page shows a read-only overview. Edit the graph in the advanced editor; the inference page uses the shared input-file list."
+    "comfyReadOnlyHint": "Advanced (comfy) workflows are free-form; this page shows a read-only overview. Edit the graph in the advanced editor; the inference page uses the shared input-file list.",
+    "editorWindowOpenFailed": "Unable to open the workflow window. Please try again."
   },
   "workbench": {
     "open": "Open Workflow",
@@ -1948,6 +1949,8 @@
     "running": "Running",
     "done": "Done",
     "failed": "Failed",
-    "cancelled": "Cancelled"
+    "cancelled": "Cancelled",
+    "hostUnavailable": "Unable to connect to the main window. Open the main window and try again.",
+    "runNotFound": "This workflow run was not found. Reopen the workflow and try again."
   }
 }

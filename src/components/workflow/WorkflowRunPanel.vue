@@ -6,6 +6,8 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { isTauriRuntime } from '@/utils/appStore'
 import { useTaskStore } from '@/stores/task'
 import { useWorkbenchStore } from '@/stores/workbench'
+import { isMainTaskOwner } from '@/utils/taskOwner'
+import { requestWorkbenchAction } from '@/utils/workbenchBridge'
 
 const props = defineProps<{ workflowKey: string; definition: Record<string, unknown>; submitting?: boolean; dirty?: boolean }>()
 const viewMode = defineModel<'edit' | 'execution'>('viewMode', { default: 'edit' })
@@ -17,7 +19,10 @@ const { t } = useI18n()
 const message = useMessage()
 const expanded = ref(false)
 const session = computed(() => workbench.session(props.workflowKey))
-const jobs = computed(() => task.allJobs.filter(job => job.primary.runConfig?.workbench && job.primary.runConfig.workflowId === props.workflowKey))
+const owner = isMainTaskOwner()
+const jobs = computed(() => owner
+  ? task.allJobs.filter(job => job.primary.runConfig?.workbench && job.primary.runConfig.workflowId === props.workflowKey)
+  : workbench.remoteJobs[props.workflowKey] || [])
 const currentJob = computed(() => jobs.value.find(job => job.id === jobId.value) || null)
 const currentTask = computed(() => currentJob.value?.tasks.find(item => item.id === session.value.selectedTaskId)
   || currentJob.value?.tasks.find(item => item.status === 'separating')
@@ -39,8 +44,10 @@ function audioSource(path: string) { return isTauriRuntime() ? convertFileSrc(pa
 async function retry() {
   if (!currentTask.value) return
   try {
-    const next = await task.retryTask(currentTask.value.id)
-    if (next) { jobId.value = next.jobId || next.id; session.value.selectedTaskId = ''; viewMode.value = 'execution' }
+    const next = owner
+      ? await task.retryTask(currentTask.value.id).then(value => value ? { jobId: value.jobId || value.id } : null)
+      : await requestWorkbenchAction({ action: 'retry', workflowKey: props.workflowKey, taskId: currentTask.value.id })
+    if (next?.jobId) { jobId.value = next.jobId; session.value.selectedTaskId = ''; viewMode.value = 'execution' }
   } catch (error) { message.error(String(error)) }
 }
 </script>

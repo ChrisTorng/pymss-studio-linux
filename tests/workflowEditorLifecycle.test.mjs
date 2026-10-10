@@ -118,6 +118,8 @@ function environment() {
   const reads = []
   const writes = []
   const exports = []
+  const editorOpens = []
+  let editorOpenError
   const callbacks = new Map()
   const listeners = new Map()
   let callbackId = 0
@@ -227,6 +229,11 @@ function environment() {
           writes.push(stored)
           return null
         }
+        if (command === 'open_workflow_simple_editor_window' || command === 'open_workflow_node_editor_window') {
+          if (editorOpenError) throw editorOpenError
+          editorOpens.push({ command, payload: args.payload })
+          return { opened: true }
+        }
         if (command === 'save_text_file_dialog') {
           exports.push(args)
           return args.defaultName
@@ -252,7 +259,8 @@ function environment() {
   const store = useWorkflowStore(pinia)
   stores.push(store)
   return {
-    store, reads, writes, listeners, exports,
+    store, reads, writes, listeners, exports, editorOpens,
+    set editorOpenFailure(value) { editorOpenError = value },
     get stored() { return stored },
     set stored(value) { stored = structuredClone(value) },
     set read(value) { readHook = value },
@@ -709,7 +717,7 @@ test('main-window listeners that finish registering after unmount are released',
   assert.equal(env.reads.length, 0)
 })
 
-test('the main-window workflow editor remains subscribed to workflow changes', async () => {
+test('workflow editor routes do not turn the main window into an embedded workbench', async () => {
   const env = environment()
   await env.store.initialize()
   env.mount(App)
@@ -719,8 +727,8 @@ test('the main-window workflow editor remains subscribed to workflow changes', a
   env.dispatch(closeEvent('simple'))
   env.dispatch('pymss://workflow-simple-editor-action', { action: 'run', workflowId: 'original' })
   await flush()
-  assert.equal(env.reads.length, 2)
-  assert.deepEqual(navigation, [{ path: '/workflow-simple-editor', query: { workflowId: 'original' } }])
+  assert.equal(env.reads.length, 0)
+  assert.deepEqual(navigation, [])
 })
 
 test('revision conflicts still reject saves without changing data or closing the editor', async () => {
@@ -1003,7 +1011,7 @@ test('a pending save does not restore the selection the user has already left', 
   assert.deepEqual(selections, ['second'])
 })
 
-test('the main-window run action still reloads, selects the requested workflow and navigates', async () => {
+test('legacy editor actions refresh the main window without navigating into the editor', async () => {
   const env = environment()
   await env.store.initialize()
   env.mount(App)
@@ -1016,8 +1024,38 @@ test('the main-window run action still reloads, selects the requested workflow a
   assert.equal(env.reads.length, 1)
   assert.equal(env.store.selectedWorkflowId, 'saved')
   assert.equal(page.state.editingId, 'saved')
-  assert.deepEqual(navigation, [{ path: '/workflow-simple-editor', query: { workflowId: 'saved' } }])
+  assert.deepEqual(navigation, [])
   assert.equal(env.writes.length, 1)
   assert.equal(env.stored.selectedWorkflowId, 'saved')
   assert.deepEqual(env.stored.workflows.map(item => item.id).sort(), ['original', 'saved'])
+})
+
+
+test('simple and advanced workflows open native editor windows without replacing the overview', async () => {
+  const env = environment()
+  await env.store.initialize()
+  const page = env.mount(WorkflowsView)
+  await page.state.openSimpleEditor({ workflowId: 'original' })
+  await page.state.openNodeEditor({ workflowId: 'advanced', skipWarning: true })
+  assert.deepEqual(env.editorOpens, [
+    { command: 'open_workflow_simple_editor_window', payload: { workflowId: 'original', newWorkflow: false } },
+    { command: 'open_workflow_node_editor_window', payload: { workflowId: 'advanced', newWorkflow: false } },
+  ])
+  assert.equal(env.store.simpleEditorOpenWorkflowId, 'original')
+  assert.equal(env.store.nodeEditorOpenWorkflowId, 'advanced')
+  assert.deepEqual(navigation, [])
+})
+
+test('new workflows use blank native windows and a failed open leaves the overview in place', async () => {
+  const env = environment()
+  await env.store.initialize()
+  const page = env.mount(WorkflowsView)
+  await page.state.openSimpleEditor({ forceNew: true })
+  assert.deepEqual(env.editorOpens, [{ command: 'open_workflow_simple_editor_window', payload: { workflowId: '', newWorkflow: true } }])
+  assert.equal(env.store.simpleEditorOpenWorkflowId, '__new__')
+  env.editorOpenFailure = new Error('Window creation failed')
+  await page.state.openNodeEditor({ workflowId: 'original', skipWarning: true })
+  assert.equal(env.store.nodeEditorOpenWorkflowId, '')
+  assert.deepEqual(navigation, [])
+  assert.equal(messages.at(-1).text, 'Window creation failed')
 })

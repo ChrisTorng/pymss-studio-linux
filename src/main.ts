@@ -6,6 +6,7 @@ import i18n from './i18n'
 import { initTheme } from './utils/theme'
 import { connectWorkerEvents } from './utils/events'
 import { isMainTaskOwner } from './utils/taskOwner'
+import { initializeWorkbenchBridge } from './utils/workbenchBridge'
 import { useSettingsStore } from '@/stores/settings'
 import { useAppStore, type RuntimeBackend } from '@/stores/app'
 import { useUpdateStore } from '@/stores/update'
@@ -45,6 +46,9 @@ async function bootstrap() {
   const models = await import('@/stores/model').then((mod) => mod.useModelStore(pinia))
   const workflows = await import('@/stores/workflow').then((mod) => mod.useWorkflowStore(pinia))
   await Promise.allSettled([models.initialize(), workflows.initialize()])
+  await initializeWorkbenchBridge().catch(error => {
+    console.warn('Failed to connect workflow editor windows', error)
+  })
   // Register after the webview and dependent stores are ready. Tauri's event
   // bridge can still be initializing while the entry module is evaluated;
   // connecting here avoids a bootstrap race and lets early events update fully

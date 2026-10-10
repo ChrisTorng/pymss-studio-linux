@@ -14,7 +14,6 @@ import {
   PlayOutline,
   SearchOutline,
 } from '@vicons/ionicons5'
-import { useRouter } from 'vue-router'
 import { invoke } from '@tauri-apps/api/core'
 import { storeToRefs } from 'pinia'
 import WorkflowCreateChooser from '@/components/workflow/WorkflowCreateChooser.vue'
@@ -42,7 +41,6 @@ import {
 } from '@/workflows/runtimeDefinition'
 
 const { t } = useI18n()
-const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
 const workflow = useWorkflowStore()
@@ -416,11 +414,28 @@ async function saveMeta() {
   }
 }
 
+async function openEditorWindow(kind: 'simple' | 'node', workflowId: string, newWorkflow: boolean) {
+  try {
+    if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
+      await invoke(`open_workflow_${kind}_editor_window`, { payload: { workflowId, newWorkflow } })
+    } else {
+      const query = newWorkflow ? 'new=1' : `workflowId=${encodeURIComponent(workflowId)}`
+      const popup = window.open(`#/workflow-${kind}-editor?${query}`, `workflow-${kind}-editor-${workflowId || 'new'}`, 'popup=yes,width=1440,height=900')
+      if (!popup) throw new Error(t('workflows.editorWindowOpenFailed'))
+      popup.focus()
+    }
+    if (kind === 'simple') workflow.markSimpleEditorOpen(newWorkflow ? '__new__' : workflowId)
+    else workflow.markNodeEditorOpen(newWorkflow ? '__new__' : workflowId)
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : t('workflows.editorWindowOpenFailed'))
+  }
+}
+
 async function openSimpleEditor(options: { forceNew?: boolean; workflowId?: string } = {}) {
   const forceNew = options.forceNew === true
   const workflowId = forceNew ? '' : (options.workflowId || selectedWorkflow.value?.id || selectedWorkflowId.value || '')
   const isNewWorkflow = forceNew || !workflowId
-  await router.push({ path: '/workflow-simple-editor', query: isNewWorkflow ? { new: '1' } : { workflowId } })
+  await openEditorWindow('simple', workflowId, isNewWorkflow)
 }
 
 function createSimpleWorkflow() {
@@ -565,7 +580,7 @@ async function openNodeEditor(options: { forceNew?: boolean; workflowId?: string
     ? ''
     : (options.workflowId || selectedWorkflow.value?.id || selectedWorkflowId.value || editingId.value || '')
   const isNewWorkflow = forceNew || !workflowId
-  await router.push({ path: '/workflow-node-editor', query: isNewWorkflow ? { new: '1' } : { workflowId } })
+  await openEditorWindow('node', workflowId, isNewWorkflow)
 }
 
 function syncRefreshedWorkflowDetails(selected: WorkflowEntry | null) {

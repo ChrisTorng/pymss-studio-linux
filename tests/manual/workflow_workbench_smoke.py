@@ -101,7 +101,7 @@ with sync_playwright() as playwright:
     page.get_by_text('当前流程', exact=True).click()
     expect(page.locator('.simple-node-editor__title input')).to_have_value('批量反相与后续处理')
     page.once('dialog', lambda dialog: dialog.accept())
-    page.locator('.side-nav').get_by_text('分离', exact=True).click()
+    page.locator('.workbench-header').get_by_role('button', name='返回工作流', exact=True).click()
     page.wait_for_timeout(300)
     page.evaluate("location.hash='/workflow-node-editor?workflowId=stereo'")
     page.wait_for_load_state('networkidle')
