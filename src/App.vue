@@ -353,7 +353,7 @@ const themeOverrides = computed(() => {
         <n-dialog-provider>
         <div class="app-shell" :class="{ 'app-shell--editor': isStandaloneRoute, 'app-shell--workflow-node-editor': isStandaloneRoute && isWorkflowEditorRoute, 'app-shell--native-titlebar': isMacOS, 'no-animations': !settings.animationsEnabled }">
           <div class="app-backdrop" />
-          <TitleBar v-if="!isStandaloneRoute" />
+          <TitleBar v-if="!isWorkflowEditorRoute || isMainTaskOwner()" />
           <div v-if="app.workerEventConnectionStatus === 'error'" class="worker-event-alert">
             <n-alert type="error" :show-icon="true">
               <template #header>{{ t('app.workerConnectionFailed') }}</template>

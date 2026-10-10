@@ -1,4 +1,11 @@
 import { createRouter, createWebHashHistory } from 'vue-router'
+import { invoke } from '@tauri-apps/api/core'
+import { createWorkflowEditorRouteGuard } from '@/workflows/editorWindow'
+import { isMainTaskOwner } from '@/utils/taskOwner'
+import { isTauriRuntime } from '@/utils/appStore'
+import { useToastStore } from '@/stores/toast'
+import { useWorkflowStore } from '@/stores/workflow'
+import i18n from '@/i18n'
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -18,5 +25,18 @@ const router = createRouter({
     { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
   ],
 })
+
+router.beforeEach(createWorkflowEditorRouteGuard({
+  isDesktopMainWindow: () => isTauriRuntime() && isMainTaskOwner(),
+  openWindow: async (command, args) => {
+    const result = await invoke(command, args)
+    const workflow = useWorkflowStore()
+    const id = args.payload.newWorkflow ? '__new__' : args.payload.workflowId
+    if (command === 'open_workflow_simple_editor_window') workflow.markSimpleEditorOpen(id)
+    else workflow.markNodeEditorOpen(id)
+    return result
+  },
+  onError: error => useToastStore().error(error instanceof Error ? error.message : i18n.global.t('workflows.editorWindowOpenFailed')),
+}))
 
 export default router
