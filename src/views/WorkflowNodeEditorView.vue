@@ -1,11 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useMessage, type InputInst } from 'naive-ui'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
 import { storeToRefs } from 'pinia'
+import WorkflowRunPanel from '@/components/workflow/WorkflowRunPanel.vue'
+import WorkflowNodeBindings from '@/components/workflow/WorkflowNodeBindings.vue'
+import { useWorkflowWorkbench } from '@/composables/useWorkflowWorkbench'
+import { cloneWorkflow } from '@/workflows/workbench'
 import WorkflowNodeEditor from '@/components/workflow/WorkflowNodeEditorLite.vue'
 import WorkflowRevisionConflictModal from '@/components/workflow/WorkflowRevisionConflictModal.vue'
 import { useModelStore } from '@/stores/model'
@@ -109,7 +113,7 @@ const missingModelNodes = computed(() => {
   }
   return missing
 })
-const canSave = computed(() => !formError.value && !saving.value)
+const canSave = computed(() => Boolean(name.value.trim()) && !saving.value)
 
 function snapshot() {
   return JSON.stringify({
@@ -125,6 +129,34 @@ const dirty = computed(() => loaded.value
   && Boolean(initialSnapshot.value)
   && snapshot() !== initialSnapshot.value)
 
+const workflowKey = computed(() => editingId.value || 'new-graph')
+const currentDefinition = computed(() => definition.value)
+const workbench = useWorkflowWorkbench({ workflowKey, definition: () => definition.value, save: () => save() })
+const { viewMode, selectedJobId, executionDefinition, executionNodeSummaries, nodeStates, nodeSummaries, submitting } = workbench
+async function runWorkflow() {
+  syncCurrentDefinition()
+  if (isStandaloneWindow.value && currentWindow) {
+    const bindings = JSON.parse(JSON.stringify(workbench.session.value.bindings))
+    const entry = await save()
+    if (!entry) return
+    await currentWindow.emit('pymss://workflow-simple-editor-action', { action: 'run', workflowId: entry.id, bindings })
+    await destroyWindow()
+    return
+  }
+  await workbench.run()
+}
+const executionGraph = computed(() => cloneWorkflow(executionDefinition.value || {}))
+const bindingNode = ref('')
+const bindingAction = ref('')
+function openRuntimeNode(binding: { id: string; action: string }) { bindingAction.value = binding.action; bindingNode.value = binding.id }
+let confirmedClose = false
+onBeforeRouteLeave(() => confirmedClose || !dirty.value || window.confirm(t('workflows.simpleUnsavedHint')))
+
+let canvasInitialized = false
+function initializeEditorBaseline() {
+  if (!canvasInitialized) captureInitialSnapshot()
+  canvasInitialized = true
+}
 function captureInitialSnapshot() {
   initialSnapshot.value = snapshot()
 }
@@ -184,32 +216,40 @@ async function persistDefinition(
   definitionToSave: Record<string, unknown>,
   options: { force?: boolean; saveCopy?: boolean } = {},
 ) {
-  if (saving.value) return false
+  if (saving.value) return null
   saving.value = true
+  const savedSnapshot = snapshot()
+  const capturedDefinition = cloneWorkflow(definitionToSave)
   try {
     const entry = await workflow.saveWorkflow({
       id: options.saveCopy ? undefined : (editingId.value || undefined),
       name: options.saveCopy ? t('workflows.copyName', { name: name.value }) : name.value,
       description: description.value,
-      definition: definitionToSave,
+      definition: capturedDefinition,
       expectedUpdatedAt: options.saveCopy ? undefined : loadedUpdatedAt.value,
       force: options.force,
     })
     pendingDefinition.value = null
     showRevisionConflict.value = false
-    loadWorkflow(entry)
-    captureInitialSnapshot()
+    if (snapshot() === savedSnapshot) {
+      loadWorkflow(entry)
+      captureInitialSnapshot()
+    } else {
+      editingId.value = entry.id
+      loadedUpdatedAt.value = entry.updatedAt
+      initialSnapshot.value = savedSnapshot
+    }
     message.success(t('workflows.saved'))
-    return true
+    return entry
   } catch (error) {
     if (error instanceof WorkflowRevisionConflictError) {
       pendingDefinition.value = definitionToSave
       showRevisionConflict.value = true
-      return false
+      return null
     }
     console.error('[workflow-node-editor-view] save failed', error)
     message.error(error instanceof Error ? error.message : t('workflows.saveFailed'))
-    return false
+    return null
   } finally {
     saving.value = false
   }
@@ -218,7 +258,7 @@ async function persistDefinition(
 async function save(currentDefinition?: Record<string, unknown>) {
   if (currentDefinition && typeof currentDefinition === 'object') definition.value = currentDefinition
   else syncCurrentDefinition()
-  if (!canSave.value) return false
+  if (!canSave.value) return null
   const definitionToSave = storeGraphDefaults(definition.value, {
     device: defaultDevice.value,
     outputFormat: defaultFormat.value,
@@ -268,6 +308,7 @@ async function destroyWindow() {
     }
     return
   }
+  confirmedClose = true
   await router.push('/workflows')
 }
 
@@ -429,6 +470,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="config-grid">
+        <n-button size="small" @click="closeEditor">{{ t('workflows.returnToWorkflows') }}</n-button>
         <label class="config-field">
           <span>{{ t('workflows.defaultDevice') }}</span>
           <n-select v-model:value="defaultDevice" size="small" :options="deviceOptions" />
@@ -447,24 +489,23 @@ onBeforeUnmount(() => {
       <n-button type="primary" @click="closeEditor">{{ t('common.close') }}</n-button>
     </div>
 
-    <WorkflowNodeEditor
-      v-else-if="loaded"
-      ref="editorRef"
-      :key="editorKey"
-      v-model:definition="definition"
-      :model-options="modelOptions"
-      :models="models"
-      :default-device="defaultDevice"
-      :default-format="defaultFormat"
-      :form-error="formError"
-      :can-save="canSave"
-      :advisory="missingModelNodes.length ? t('workflows.stepModelNotDownloaded', { id: missingModelNodes.join(', ') }) : ''"
-      @save="save"
-      @close="closeEditor"
-      @initialized="captureInitialSnapshot"
-      @defaults-restored="restoreDefaultControls"
-    />
-
+    <template v-if="loaded && !formatError">
+      <WorkflowRunPanel :workflow-key="workflowKey" :definition="currentDefinition" v-model:view-mode="viewMode" v-model:job-id="selectedJobId" :submitting="submitting" :dirty="dirty" @run="runWorkflow" @cancel="workbench.cancel" />
+      <WorkflowNodeEditor v-if="viewMode === 'execution' && executionDefinition"
+        :key="'execution-' + selectedJobId" :definition="executionGraph" :model-options="modelOptions" :models="models"
+        :readonly="true" :runtime-controls="true" :node-summaries="executionNodeSummaries" :node-states="nodeStates" />
+      <WorkflowNodeEditor v-else ref="editorRef" :key="editorKey" v-model:definition="definition"
+        :runtime-controls="true" :node-summaries="nodeSummaries" :model-options="modelOptions" :models="models" :default-device="defaultDevice" :default-format="defaultFormat"
+        :form-error="formError" :can-save="canSave"
+        :advisory="missingModelNodes.length ? t('workflows.stepModelNotDownloaded', { id: missingModelNodes.join(', ') }) : ''"
+        @save="save" @run="runWorkflow" @runtime-node="openRuntimeNode"
+        @close="closeEditor" @initialized="initializeEditorBaseline" @defaults-restored="restoreDefaultControls" />
+      <n-drawer :show="Boolean(bindingNode)" :width="360" @update:show="(show: boolean) => { if (!show) bindingNode = '' }">
+        <n-drawer-content :title="t('workbench.runtimeBinding')" closable>
+          <WorkflowNodeBindings :workflow-key="workflowKey" :definition="currentDefinition" :node-id="bindingNode" :action="bindingAction" />
+        </n-drawer-content>
+      </n-drawer>
+    </template>
     <n-modal v-model:show="showClosePrompt" preset="card" :title="t('workflows.simpleUnsavedTitle')" style="width: min(440px, calc(100vw - 32px))">
       <p>{{ t('workflows.simpleUnsavedHint') }}</p>
       <template #footer>
@@ -486,12 +527,14 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.workflow-node-editor-page > .litegraph-editor { flex: 1; min-height: 0; }
+
 .workflow-node-editor-page {
   height: 100%;
   min-height: 0;
   padding: 0 12px 12px;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 10px;
   -webkit-app-region: no-drag;
 }
@@ -644,7 +687,7 @@ onBeforeUnmount(() => {
 
 .config-grid {
   display: grid;
-  grid-template-columns: minmax(132px, 156px) minmax(132px, 156px);
+  grid-template-columns: auto minmax(132px, 156px) minmax(132px, 156px);
   gap: 8px;
   align-items: end;
 }

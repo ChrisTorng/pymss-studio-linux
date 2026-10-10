@@ -105,7 +105,7 @@ xattr -cr '/Applications/Pymss Studio.app'
 4. **Run and review.** Select **Start Separation**, monitor progress and logs in the task queue, and audition the finished stems or open **Results**.
 5. **Edit and export.** Open a result in the stem editor, adjust clips, volume, pan, and effects, save the project, and use **Export Mix** to create an audio file.
 
-For a repeatable processing chain, create and save a workflow under **Workflows**, then switch **Separate** to **Workflow** mode. A short input can help confirm the model, device, and outputs before a larger batch.
+For a repeatable processing chain, open or create a workflow under **Workflows**, choose files or a folder on its input nodes and directories on its output nodes, then save and run directly in the editor. Follow node progress on the canvas; edits made during execution apply to the next run. A short input can help confirm the model, device, and outputs before a larger batch.
 
 ## Preview
 

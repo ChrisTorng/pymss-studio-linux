@@ -5,6 +5,7 @@ import router from './router'
 import i18n from './i18n'
 import { initTheme } from './utils/theme'
 import { connectWorkerEvents } from './utils/events'
+import { isMainTaskOwner } from './utils/taskOwner'
 import { useSettingsStore } from '@/stores/settings'
 import { useAppStore, type RuntimeBackend } from '@/stores/app'
 import { useUpdateStore } from '@/stores/update'
@@ -38,7 +39,7 @@ async function bootstrap() {
     console.warn('Failed to initialize update store', error)
   })
   const tasks = await import('@/stores/task').then((mod) => mod.useTaskStore(pinia))
-  await tasks.initialize().catch((error) => {
+  if (isMainTaskOwner()) await tasks.initialize().catch((error) => {
     console.warn('Failed to initialize tasks', error)
   })
   const models = await import('@/stores/model').then((mod) => mod.useModelStore(pinia))

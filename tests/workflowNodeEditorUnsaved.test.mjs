@@ -83,7 +83,7 @@ function createContext() {
 
 test('advanced editor exposes the same unsaved-close actions as the simple editor', () => {
   assert.ok(template.includes('ref="editorRef"'))
-  assert.ok(template.includes('@initialized="captureInitialSnapshot"'))
+  assert.ok(template.includes('@initialized="initializeEditorBaseline"'))
   assert.ok(template.includes('v-model:show="showClosePrompt"'))
   assert.ok(template.includes("t('workflows.simpleDiscardChanges')"))
   assert.ok(template.includes("t('workflows.simpleSaveAndClose')"))

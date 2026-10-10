@@ -24,6 +24,8 @@ import {
 } from '@/features/tasks/lifecycle'
 import { normalizeStemOutputs, stemFromOutputPath, type StemOutput } from '@/utils/stemOutputs'
 import { normalizeConcurrentSeparations } from '@/features/tasks/concurrency'
+import { isMainTaskOwner } from '@/utils/taskOwner'
+import { cloneWorkflow, prepareWorkbenchRun, type WorkflowRuntimeBindings, type WorkflowWorkbenchSnapshot, type WorkflowNodeState } from '@/workflows/workbench'
 import { SEPARATE_MODEL_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
 
 export type { TaskStatus } from '@/features/tasks/lifecycle'
@@ -46,6 +48,7 @@ export type SeparationRunConfig = {
   workflowId?: string
   workflowName?: string
   workflowDefinition?: Record<string, unknown>
+  workbench?: WorkflowWorkbenchSnapshot
   modelType?: string | null
   outputLayout: OutputLayout
   outputNaming?: OutputNamingConfig
@@ -76,6 +79,7 @@ export type SeparationTask = {
   jobOutput?: string
   outputPrefix?: string
   output: string
+  outputDirectories?: string[]
   status: TaskStatus
   message: string
   createdAt: number
@@ -93,6 +97,8 @@ export type SeparationTask = {
   logs: string[]
   error?: string
   runConfig?: SeparationRunConfig
+  nodeStates?: Record<string, WorkflowNodeState>
+  currentNodeId?: string
   taskHidden?: boolean
   resultHidden?: boolean
 }
@@ -372,6 +378,7 @@ function normalizeTask(task: Partial<SeparationTask>): SeparationTask {
     jobOutput: typeof task.jobOutput === 'string' && task.jobOutput.trim() ? normalizeOutputPath(task.jobOutput) : undefined,
     outputPrefix: typeof task.outputPrefix === 'string' && task.outputPrefix.trim() ? task.outputPrefix : undefined,
     output: normalizedOutput,
+    ...(Array.isArray(task.outputDirectories) ? { outputDirectories: task.outputDirectories.filter(path => typeof path === 'string' && path.trim()) } : {}),
     status,
     message: interrupted ? '上次运行未完成' : (task.message || meta.label),
     createdAt: task.createdAt || Date.now(),
@@ -391,6 +398,8 @@ function normalizeTask(task: Partial<SeparationTask>): SeparationTask {
       : (task.logs || []),
     error: interrupted ? '应用关闭或重启导致任务中断' : task.error,
     runConfig: normalizedRunConfig,
+    nodeStates: task.nodeStates,
+    currentNodeId: interrupted ? undefined : task.currentNodeId,
     taskHidden: task.taskHidden === true,
     resultHidden: task.resultHidden === true,
   }
@@ -1163,6 +1172,7 @@ export const useTaskStore = defineStore('task', () => {
             workflowName: config.workflowName || task.model,
             workflow: config.workflowDefinition || {},
             input: task.input || null,
+            ...(config.workbench ? { workbench: true, inputs: config.workbench.inputs, workbenchOutputs: config.workbench.outputs } : {}),
             output: config.outputLayout === 'folders' ? (task.jobOutput || task.output) : task.output,
             modelDir: config.modelDir ?? (settings.modelDir || null),
             source: config.downloadSource || settings.downloadSource,
@@ -1291,11 +1301,13 @@ export const useTaskStore = defineStore('task', () => {
           workflowName: config.workflowName || primary.model,
           workflow: config.workflowDefinition || {},
           output: primary.jobOutput || primary.output,
+          ...(config.workbench ? { workbench: true } : {}),
           tasks: batchTasks.map((task, index) => ({
             taskId: task.id,
             input: task.input,
             output: task.output,
             inputIndex: index + 1,
+            ...(task.runConfig?.workbench ? { inputs: task.runConfig.workbench.inputs, workbenchOutputs: task.runConfig.workbench.outputs } : {}),
           })),
           modelDir: config.modelDir ?? (settings.modelDir || null),
           source: config.downloadSource || settings.downloadSource,
@@ -1332,6 +1344,7 @@ export const useTaskStore = defineStore('task', () => {
     // Browser-only previews cannot start a Rust worker. Keep restored queue items
     // intact until the desktop runtime is available instead of failing them on boot.
     if (!isTauriRuntime()) return
+    if (!isMainTaskOwner()) return
     const nextJobs = selectQueuedJobGroups(tasks.value, maxConcurrentSeparations())
     nextJobs.forEach((jobTasks) => {
       if (jobTasks.length === 1) {
@@ -1393,6 +1406,14 @@ export const useTaskStore = defineStore('task', () => {
       const done = Number(event.payload?.done)
       const total = Number(event.payload?.total)
       const detail = typeof event.payload?.message === 'string' ? event.payload.message : undefined
+      const nodeId = typeof event.payload?.nodeId === 'string' ? event.payload.nodeId : undefined
+      const nodeProgress = event.payload?.nodeProgress
+      if (nodeId && typeof nodeProgress === 'number' && Number.isFinite(nodeProgress)) {
+        const fraction = clamp(nodeProgress, 0, 1)
+        task.nodeStates ||= {}
+        task.nodeStates[nodeId] = { status: fraction >= 1 ? 'done' : 'running', progress: fraction * 100 }
+        task.currentNodeId = fraction < 1 ? nodeId : undefined
+      }
       task.status = stage
       if (stage !== 'queued') markTaskStarted(task)
       task.stageLabel = STAGE_META[stage].label
@@ -1416,6 +1437,16 @@ export const useTaskStore = defineStore('task', () => {
       appendTaskLogs(task, settings.developerMode ? `[${level}] ${message}` : `${level}: ${message}`)
     } else if (event.type === 'error') {
       if (isTerminalTaskStatus(task.status)) return
+      if (task.runConfig?.workbench && Array.isArray(event.payload?.outputs)) {
+        task.outputs = normalizeStemOutputs(event.payload.outputs, task.input)
+        task.files = task.outputs.map(output => output.path)
+      }
+      if (typeof event.payload?.nodeId === 'string' && task.nodeStates?.[event.payload.nodeId]) {
+        task.nodeStates[event.payload.nodeId].status = 'failed'
+      }
+      if (task.currentNodeId && task.nodeStates?.[task.currentNodeId]) {
+        task.nodeStates[task.currentNodeId].status = 'failed'
+      }
       const codeValue = event.payload?.code
       const code = codeValue ? `[${codeValue}] ` : ''
       const message = resolveTaskErrorMessage(codeValue, event.payload?.message, task.input)
@@ -1450,6 +1481,10 @@ export const useTaskStore = defineStore('task', () => {
       if (event.payload?.outputDir) {
         task.output = event.payload.outputDir
       }
+      if (task.runConfig?.workbench && Array.isArray(event.payload?.outputDirectories)) {
+        task.outputDirectories = event.payload.outputDirectories.filter((path: unknown): path is string => typeof path === 'string' && Boolean(path.trim()))
+        if (task.outputDirectories?.length) task.output = task.outputDirectories[0]
+      }
       if (typeof event.payload?.outputRoot === 'string' && event.payload.outputRoot) {
         task.jobOutput = event.payload.outputRoot
       } else if (task.runConfig?.outputLayout === 'flat' && event.payload?.outputDir) {
@@ -1465,6 +1500,7 @@ export const useTaskStore = defineStore('task', () => {
       queuePersist()
     } else if (event.type === 'task_cancelled') {
       if (isTerminalTaskStatus(task.status)) return
+      if (task.currentNodeId && task.nodeStates?.[task.currentNodeId]) task.nodeStates[task.currentNodeId].status = 'cancelled'
       task.status = 'cancelled'
       markTaskStarted(task)
       task.message = event.payload?.message || 'Cancelled'
@@ -1564,6 +1600,8 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function resultTrashEmptyDirs(task: SeparationTask): string[] {
+    // Node-bound directories can have unrelated roots; only recycle explicit output files.
+    if (task.runConfig?.workbench) return []
     if (task.runConfig?.outputLayout !== 'folders') return []
     const jobOutput = task.jobOutput?.trim()
     const output = task.output?.trim()
@@ -1583,7 +1621,7 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   function primaryRevealPath(task: SeparationTask) {
-    return task.output
+    return task.runConfig?.workbench ? task.outputs[0]?.path || task.output : task.output
   }
 
   function getTaskById(id: string) {
@@ -1734,6 +1772,7 @@ export const useTaskStore = defineStore('task', () => {
     }
     const cancelled = await invoke<boolean>('cancel_task', { taskId: id })
     if (cancelled) {
+      if (task.currentNodeId && task.nodeStates?.[task.currentNodeId]) task.nodeStates[task.currentNodeId].status = 'cancelled'
       task.status = 'cancelled'
       task.message = 'Cancelled'
       task.stageLabel = STAGE_META.cancelled.label
@@ -1744,6 +1783,16 @@ export const useTaskStore = defineStore('task', () => {
       scheduleQueue()
     }
     return cancelled
+  }
+
+  async function cancelWorkbenchJob(jobId: string) {
+    const targets = tasks.value.filter(task => (task.jobId || task.id) === jobId && !isTerminalTaskStatus(task.status))
+    // Remove the entire queued remainder before any cancellation can resume scheduling.
+    for (const target of targets.filter(task => task.status === 'queued')) setTaskStatus(target.id, 'cancelled', 'Cancelled')
+    for (const target of targets) {
+      if (!isTerminalTaskStatus(target.status)) await cancelTask(target.id)
+    }
+    scheduleQueue()
   }
 
   function buildInferenceParams(modelType?: string | null): Record<string, unknown> {
@@ -1971,9 +2020,46 @@ export const useTaskStore = defineStore('task', () => {
     scheduleQueue()
     return { succeeded: targets.length, failed: 0, total: targets.length, jobId, tasks: createdTasks }
   }
+  async function startWorkbenchInference(workflow: WorkflowEntry, bindings: WorkflowRuntimeBindings) {
+    if (!isMainTaskOwner()) throw new Error('workbench.mainWindowOnly')
+    const validationError = workflowDefinitionValidationError(workflow.definition)
+    if (validationError) throw new Error(validationError)
+    const directory = resolveOutputDirectory(undefined, useSettingsStore().outputDir)
+    const prepared = prepareWorkbenchRun(workflow.definition, bindings, directory)
+    const jobId = createRunId('job')
+    const runtimeEntry = { ...workflow, definition: prepared.definition }
+    const createdTasks = prepared.runs.map(run => {
+      const created = createQueuedWorkflowTask(run.input, runtimeEntry, jobId, directory, bindings.outputLayout)
+      tasks.value.find(task => task.id === created.id)!.runConfig!.useTta = false
+      tasks.value.find(task => task.id === created.id)!.runConfig!.workbench = {
+        version: 1, sourceUpdatedAt: workflow.updatedAt,
+        sourceDefinition: cloneWorkflow(workflow.definition), bindings: cloneWorkflow(bindings),
+        inputs: cloneWorkflow(run.inputs), outputs: cloneWorkflow(run.outputs),
+      }
+      return created
+    })
+    queuePersist()
+    scheduleQueue()
+    return { jobId, tasks: createdTasks, total: createdTasks.length }
+  }
+
   async function retryTask(taskId: string) {
     const existing = tasks.value.find((t) => t.id === taskId)
     if (!existing) return
+    if (existing.runConfig?.workbench && existing.runConfig.workflowDefinition) {
+      const config = cloneWorkflow(existing.runConfig)
+      const snapshot = config.workbench!
+      const created = createQueuedWorkflowTask(existing.input, {
+        id: config.workflowId!, name: config.workflowName || existing.model, description: '',
+        definition: snapshot.sourceDefinition, format: detectWorkflowFormat(snapshot.sourceDefinition),
+        formatVersion: WORKFLOW_FORMAT_VERSION, createdAt: existing.createdAt, updatedAt: snapshot.sourceUpdatedAt,
+      }, undefined, existing.jobOutput || existing.output, config.outputLayout, config.outputNaming)
+      const queued = tasks.value.find(task => task.id === created.id)!
+      queued.runConfig = config
+      queued.output = existing.output
+      scheduleQueue()
+      return created
+    }
     const outputLayout = normalizeOutputLayout(existing.runConfig?.outputLayout)
     const windows = windowsPaths.value
     const isAbsolute = (path: string) => windows ? /^(?:[A-Za-z]:[/\\]|[/\\]{2})/.test(path) : path.startsWith('/')
@@ -2020,6 +2106,8 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   return {
+    cancelWorkbenchJob,
+    startWorkbenchInference,
     initialized,
     tasks,
     activeTaskId,

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { darkTheme } from 'naive-ui'
 import TitleBar from '@/components/TitleBar.vue'
 import SideNav from '@/components/SideNav.vue'
+import { isMainTaskOwner } from '@/utils/taskOwner'
 import AppBrandMark from '@/components/AppBrandMark.vue'
 import StartupOnboarding from '@/components/StartupOnboarding.vue'
 import ViewportRecoveryOverlay from '@/components/ViewportRecoveryOverlay.vue'
@@ -15,6 +16,9 @@ import { useI18n } from 'vue-i18n'
 import { listen, type EventCallback, type UnlistenFn } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-shell'
 import { useWorkflowStore } from '@/stores/workflow'
+import { useToastStore } from '@/stores/toast'
+import { useWorkbenchStore } from '@/stores/workbench'
+import type { WorkflowRuntimeBindings } from '@/workflows/workbench'
 import { activeRuntimeEnvironment, isKnownRuntimeBackend, runtimeBackendLabel, runtimeCoreSyncAvailable, runtimeCoreUpdateAvailable as hasRuntimeCoreUpdate } from '@/utils/runtime'
 import { connectWorkerEvents } from '@/utils/events'
 
@@ -45,7 +49,8 @@ const workflowEventUnlisteners: UnlistenFn[] = []
 let unmounted = false
 
 const isDark = computed(() => themeIsDark.value)
-const isStandaloneRoute = computed(() => route.path === '/editor' || route.path === '/workflow-node-editor' || route.path === '/workflow-simple-editor')
+const isAuxiliaryWindow = !isMainTaskOwner()
+const isStandaloneRoute = computed(() => route.path === '/editor' || (isAuxiliaryWindow && (route.path === '/workflow-node-editor' || route.path === '/workflow-simple-editor')))
 const isWorkflowNodeEditorRoute = computed(() => route.path === '/workflow-node-editor')
 const isWorkflowSimpleEditorRoute = computed(() => route.path === '/workflow-simple-editor')
 const isWorkflowEditorRoute = computed(() => isWorkflowNodeEditorRoute.value || isWorkflowSimpleEditorRoute.value)
@@ -269,7 +274,7 @@ onMounted(async () => {
     await listenForMainWorkflowEvent('pymss://workflow-simple-editor-closed', () => {
       handleWorkflowEditorClosed('simple')
     })
-    await listenForMainWorkflowEvent<{ action?: string; workflowId?: string }>('pymss://workflow-simple-editor-action', async (event) => {
+    await listenForMainWorkflowEvent<{ action?: string; workflowId?: string; bindings?: WorkflowRuntimeBindings }>('pymss://workflow-simple-editor-action', async (event) => {
       // `WebviewWindow.emit` broadcasts to every webview.  Only the main
       // window should react to an editor action; handling it inside the
       // standalone editor would replace that window with the main route just
@@ -280,7 +285,19 @@ onMounted(async () => {
         // is not present in this window until the shared store is reloaded.
         await workflow.reload()
         if (payload.workflowId) workflow.selectWorkflow(payload.workflowId)
-        void router.push({ path: '/', query: { mode: 'workflow' } })
+        const entry = workflow.selectedWorkflow
+        if (entry && payload.bindings) {
+          const sessions = useWorkbenchStore()
+          const session = sessions.session(entry.id)
+          session.bindings = payload.bindings
+          try {
+            const { useTaskStore } = await import('@/stores/task')
+            const result = await useTaskStore().startWorkbenchInference(entry, payload.bindings)
+            session.selectedJobId = result.jobId
+            session.viewMode = 'execution'
+          } catch (error) { useToastStore().error(error instanceof Error ? error.message : String(error)) }
+        }
+        void router.push({ path: workflow.selectedWorkflow?.format === 'simple' ? '/workflow-simple-editor' : '/workflow-node-editor', query: { workflowId: payload.workflowId } })
       }
     })
   }
@@ -335,9 +352,9 @@ const themeOverrides = computed(() => {
     <n-notification-provider>
       <n-message-provider>
         <n-dialog-provider>
-        <div class="app-shell" :class="{ 'app-shell--editor': isStandaloneRoute, 'app-shell--workflow-node-editor': isWorkflowEditorRoute, 'app-shell--native-titlebar': isMacOS, 'no-animations': !settings.animationsEnabled }">
+        <div class="app-shell" :class="{ 'app-shell--editor': isStandaloneRoute, 'app-shell--workflow-node-editor': isStandaloneRoute && isWorkflowEditorRoute, 'app-shell--native-titlebar': isMacOS, 'no-animations': !settings.animationsEnabled }">
           <div class="app-backdrop" />
-          <TitleBar v-if="!isWorkflowEditorRoute" />
+          <TitleBar v-if="!isStandaloneRoute" />
           <div v-if="app.workerEventConnectionStatus === 'error'" class="worker-event-alert">
             <n-alert type="error" :show-icon="true">
               <template #header>{{ t('app.workerConnectionFailed') }}</template>

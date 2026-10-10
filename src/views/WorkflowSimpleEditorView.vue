@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { useI18n } from 'vue-i18n'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
 import { storeToRefs } from 'pinia'
+import WorkflowRunPanel from '@/components/workflow/WorkflowRunPanel.vue'
+import WorkflowNodeBindings from '@/components/workflow/WorkflowNodeBindings.vue'
+import { useWorkflowWorkbench } from '@/composables/useWorkflowWorkbench'
 import WorkflowSimpleNodeEditor from '@/components/workflow/WorkflowSimpleNodeEditor.vue'
 import WorkflowRevisionConflictModal from '@/components/workflow/WorkflowRevisionConflictModal.vue'
 import { useModelStore } from '@/stores/model'
@@ -70,6 +73,15 @@ function snapshot() {
 
 const dirty = computed(() => loaded.value && snapshot() !== initialSnapshot.value)
 
+const workflowKey = computed(() => editingId.value || 'new-simple')
+const currentDefinition = computed(() => buildSimpleWorkflowDefinition(draft.value) as unknown as Record<string, unknown>)
+const workbench = useWorkflowWorkbench({ workflowKey, definition: () => currentDefinition.value, save: () => persist() })
+const { viewMode, selectedJobId, executionDefinition, executionNodeSummaries, nodeStates, submitting } = workbench
+const executionDraft = computed(() => hydrateSimpleWorkflow(executionDefinition.value || { steps: [] }))
+const executionName = computed(() => workbench.focusedJob.value?.primary.model || name.value)
+let confirmedClose = false
+onBeforeRouteLeave(() => confirmedClose || !dirty.value || window.confirm(t('workflows.simpleUnsavedHint')))
+
 const simpleReasonKeys: Record<SimpleWorkflowReasonCode, string> = {
   graph_workflow: 'workflows.simpleReasonGraphWorkflow',
   advanced_parameters: 'workflows.simpleReasonAdvancedParameters',
@@ -124,7 +136,7 @@ const modelAdvisory = computed(() => {
     ? t('workflows.stepModelNotDownloaded', { id: t('workflows.stepTitle', { index: missingIndex + 1 }) })
     : ''
 })
-const canSave = computed(() => !formError.value && !saving.value)
+const canSave = computed(() => Boolean(name.value.trim()) && !saving.value)
 const canRun = computed(() => !formError.value && !saving.value)
 
 function hydrateStepModelTypes(value: SimpleDraft) {
@@ -198,6 +210,7 @@ async function persist(force = false) {
   saving.value = true
   try {
     cleanupSimpleDraft(draft.value)
+    const savedSnapshot = snapshot()
     const entry = await workflow.saveWorkflow({
       id: editingId.value || undefined,
       name: name.value.trim(),
@@ -208,7 +221,7 @@ async function persist(force = false) {
     })
     editingId.value = entry.id
     expectedUpdatedAt.value = entry.updatedAt
-    initialSnapshot.value = snapshot()
+    initialSnapshot.value = savedSnapshot
     message.success(t('workflows.saved'))
     return entry
   } catch (error) {
@@ -240,6 +253,7 @@ async function destroyWindow() {
   if (isStandaloneWindow.value && currentWindow) {
     try { await invoke('close_current_window'); return } catch { await currentWindow.close().catch(() => undefined); return }
   }
+  confirmedClose = true
   await router.push('/workflows')
 }
 
@@ -294,14 +308,15 @@ async function saveAndClose() {
 }
 
 async function runWorkflow() {
-  const entry = await persist()
-  if (!entry) return
   if (isStandaloneWindow.value && currentWindow) {
-    await currentWindow.emit('pymss://workflow-simple-editor-action', { action: 'run', workflowId: entry.id })
+    const bindings = JSON.parse(JSON.stringify(workbench.session.value.bindings))
+    const entry = await persist()
+    if (!entry) return
+    await currentWindow.emit('pymss://workflow-simple-editor-action', { action: 'run', workflowId: entry.id, bindings })
     await destroyWindow()
     return
   }
-  await router.push({ path: '/', query: { mode: 'workflow' } })
+  await workbench.run()
 }
 
 async function reloadConflict() {
@@ -410,23 +425,21 @@ onBeforeUnmount(() => {
         <template #footer><n-button type="primary" @click="destroyWindow">{{ t('workflows.returnToWorkflows') }}</n-button></template>
       </n-result>
     </div>
-    <WorkflowSimpleNodeEditor
-      v-else-if="loaded"
-      :key="editorRenderKey"
-      v-model:draft="draft"
-      v-model:name="name"
-      v-model:description="description"
-      :models="downloadedModels"
-      :model-inference-overrides="modelInferenceOverrides"
-      :saving="saving"
-      :form-error="formError"
-      :advisory="modelAdvisory"
-      :can-save="canSave"
-      :can-run="canRun"
-      @save="persist"
-      @close="closeEditor"
-      @run="runWorkflow"
-    />
+    <template v-if="loaded">
+      <div class="workbench-header"><n-button size="small" @click="closeEditor">{{ t('workflows.returnToWorkflows') }}</n-button></div>
+      <WorkflowRunPanel :workflow-key="workflowKey" :definition="currentDefinition" v-model:view-mode="viewMode" v-model:job-id="selectedJobId" :submitting="submitting" :dirty="dirty" @run="runWorkflow" @cancel="workbench.cancel" />
+      <WorkflowSimpleNodeEditor v-if="viewMode === 'execution' && executionDefinition"
+        :key="'execution-' + selectedJobId" :draft="executionDraft" :name="executionName" :description="''"
+        :models="downloadedModels" :readonly="true" :runtime-controls="true" :node-summaries="executionNodeSummaries" :node-states="nodeStates" />
+      <WorkflowSimpleNodeEditor v-else
+        :key="editorRenderKey" v-model:draft="draft" v-model:name="name" v-model:description="description"
+        :runtime-controls="true" :models="downloadedModels" :model-inference-overrides="modelInferenceOverrides" :saving="saving"
+        :form-error="formError" :advisory="modelAdvisory" :can-save="canSave" :can-run="canRun"
+        @save="persist" @close="closeEditor" @run="runWorkflow">
+        <template #runtime-input><WorkflowNodeBindings :workflow-key="workflowKey" :definition="currentDefinition" mode="inputs" /></template>
+        <template #runtime-output><WorkflowNodeBindings :workflow-key="workflowKey" :definition="currentDefinition" mode="outputs" /></template>
+      </WorkflowSimpleNodeEditor>
+    </template>
     <n-modal v-model:show="showClosePrompt" preset="card" :title="t('workflows.simpleUnsavedTitle')" style="width: min(440px, calc(100vw - 32px))">
       <p>{{ t('workflows.simpleUnsavedHint') }}</p>
       <template #footer><div class="simple-editor-page__prompt-actions"><n-button secondary @click="showClosePrompt = false; void destroyWindow()">{{ t('workflows.simpleDiscardChanges') }}</n-button><n-button type="primary" :loading="saving" :disabled="saving" @click="void saveAndClose()">{{ t('workflows.simpleSaveAndClose') }}</n-button></div></template>
@@ -442,7 +455,11 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.simple-editor-page { height: 100%; min-height: 0; background: var(--surface); color: var(--on-surface); -webkit-app-region: no-drag; }
+.simple-editor-page > .simple-node-editor { flex: 1; min-height: 0; height: auto; }
+
+.workbench-header { padding: 8px 12px; }
+
+.simple-editor-page { display: flex; flex-direction: column; height: 100%; min-height: 0; background: var(--surface); color: var(--on-surface); -webkit-app-region: no-drag; }
 .simple-editor-page * { -webkit-app-region: no-drag; }
 .simple-editor-chrome { height: 40px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid color-mix(in srgb, var(--outline) 54%, transparent); background: color-mix(in srgb, var(--surface) 84%, transparent); backdrop-filter: blur(18px) saturate(1.15); user-select: none; }
 .simple-editor-chrome__drag { display: flex; align-items: center; gap: 6px; height: 100%; padding-left: 12px; flex: 1; -webkit-app-region: drag; font-size: 12px; }

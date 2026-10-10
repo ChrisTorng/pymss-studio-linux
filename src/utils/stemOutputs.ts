@@ -1,4 +1,4 @@
-export type StemOutput = { stem: string; path: string }
+export type StemOutput = { stem: string; path: string; nodeId?: string }
 
 function fileName(path: string) {
   return String(path || '').split(/[/\\]/).pop() || ''
@@ -42,6 +42,7 @@ export function normalizeStemOutputs(value: unknown, inputPath?: string): StemOu
     return [{
       stem: explicitStem || stemFromOutputPath(nameHint || path, inputPath),
       path,
+      ...(typeof raw.nodeId === 'string' ? { nodeId: raw.nodeId } : {}),
     }]
   })
 }

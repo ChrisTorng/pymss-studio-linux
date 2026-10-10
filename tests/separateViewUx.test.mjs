@@ -27,6 +27,7 @@ const names = new Set([
   'applyCurrentModelInferenceDefaults',
   'saveCurrentModelInferenceDefaults',
   'resetCurrentModelInferenceDefaults',
+  'workflowValidationError',
 ])
 const selected = script.statements.filter(statement => (
   ts.isFunctionDeclaration(statement) ? names.has(statement.name?.text)
@@ -179,21 +180,19 @@ function ref(value) {
   return { value }
 }
 
-test('model and workflow targets keep their keyed transition boundary', () => {
-  const transitionTag = '<transition name="stage-swap" mode="out-in">'
-  const modelBranch = '<div v-if="runMode === \'model\'" key="model"'
-  const workflowBranch = '<div v-else key="workflow"'
-  const modelIndex = template.indexOf(modelBranch)
-  const transitionIndex = template.lastIndexOf(transitionTag, modelIndex)
-  const readyIndex = template.lastIndexOf('<section v-else key="ready"', modelIndex)
-  const workflowIndex = template.indexOf(workflowBranch, modelIndex)
-  const closingIndex = template.indexOf('</transition>', workflowIndex)
+test('separation keeps its model transition and delegates workflow editing to the workflow module', () => {
+  assert.ok(template.includes(`<div v-if="runMode === 'model'" key="model"`))
+  assert.equal(template.includes('<div v-else key="workflow"'), false)
+  assert.equal(template.includes('v-model:value="runMode"'), false)
+  assert.ok(scriptSource.includes("runMode.value = 'model'"))
+  assert.ok(scriptSource.includes("router.replace('/workflows')"))
+})
 
-  assert.equal(template.split(transitionTag).length - 1, 2)
-  assert.ok(modelIndex > 0)
-  assert.ok(transitionIndex > readyIndex)
-  assert.ok(workflowIndex > modelIndex)
-  assert.ok(closingIndex > workflowIndex)
+test('an unfinished selected workflow cannot block single-model separation', () => {
+  const context = { runMode: { value: 'model' }, selectedWorkflow: { value: { definition: { steps: [] } } },
+    workflowDefinitionError: () => 'invalid-workflow', computed }
+  const check = vm.runInNewContext(`${code}\nworkflowValidationError`, context)
+  assert.equal(check(), '')
 })
 
 test('model panel shows cached rows while refreshing them in the background', () => {

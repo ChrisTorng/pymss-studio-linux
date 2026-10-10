@@ -213,15 +213,8 @@ const workflowMenuOptions = computed<DropdownOption[]>(() => {
   const options: DropdownOption[] = [
     {
       key: 'edit',
-      label: isSimpleDefinition
-        ? t('workflows.simpleMode')
-        : t('workflows.openAdvancedEditor'),
-      disabled: locked || (isSimpleDefinition && (!canEditSimple || Boolean(definitionError))),
-    },
-    {
-      key: 'run',
-      label: t('workflows.runWorkflowAction'),
-      disabled: isWorkflowBlocked(current) || locked,
+      label: t('workbench.open'),
+      disabled: locked || (isSimpleDefinition && !canEditSimple),
     },
   ]
   options.push(
@@ -427,15 +420,6 @@ async function openSimpleEditor(options: { forceNew?: boolean; workflowId?: stri
   const forceNew = options.forceNew === true
   const workflowId = forceNew ? '' : (options.workflowId || selectedWorkflow.value?.id || selectedWorkflowId.value || '')
   const isNewWorkflow = forceNew || !workflowId
-  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-    try {
-      await invoke('open_workflow_simple_editor_window', { payload: { workflowId, newWorkflow: isNewWorkflow } })
-      workflow.markSimpleEditorOpen(isNewWorkflow ? '__new__' : workflowId)
-      return
-    } catch (error) {
-      console.warn('Failed to open workflow simple editor window, falling back to route navigation', error)
-    }
-  }
   await router.push({ path: '/workflow-simple-editor', query: isNewWorkflow ? { new: '1' } : { workflowId } })
 }
 
@@ -528,7 +512,7 @@ function handleWorkflowContextMenuSelect(key: string | number) {
   }
   if (key === 'run') {
     editWorkflow(current)
-    router.push({ path: '/', query: { mode: 'workflow' } })
+    openWorkflowEditor(current)
     return
   }
   if (key === 'duplicate') {
@@ -581,15 +565,6 @@ async function openNodeEditor(options: { forceNew?: boolean; workflowId?: string
     ? ''
     : (options.workflowId || selectedWorkflow.value?.id || selectedWorkflowId.value || editingId.value || '')
   const isNewWorkflow = forceNew || !workflowId
-  if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-    try {
-      await invoke('open_workflow_node_editor_window', { payload: { workflowId, newWorkflow: isNewWorkflow } })
-      workflow.markNodeEditorOpen(isNewWorkflow ? '__new__' : workflowId)
-      return
-    } catch (error) {
-      console.warn('Failed to open workflow node editor window, falling back to route navigation', error)
-    }
-  }
   await router.push({ path: '/workflow-node-editor', query: isNewWorkflow ? { new: '1' } : { workflowId } })
 }
 
@@ -642,7 +617,7 @@ function runSelected() {
     return
   }
   workflow.selectWorkflow(current.id)
-  router.push({ path: '/', query: { mode: 'workflow' } })
+  openWorkflowEditor(current)
 }
 
 // ---- comfy-mss import / export ----
@@ -1025,32 +1000,9 @@ watch([workflows, selectedWorkflowId], () => {
 
           <footer class="wf-actionbar">
             <div class="wf-actionbar__primary">
-              <n-button
-                v-if="selectedSimpleAnalysis?.editable"
-                type="primary"
-                size="large"
-                @click="editSimpleWorkflow(selectedWorkflow)"
-              >
-                <template #icon><n-icon :component="ListOutline" /></template>
-                {{ t('workflows.editSimpleAction') }}
-              </n-button>
-              <n-button
-                v-if="isComfyWorkflow"
-                type="primary"
-                size="large"
-                @click="openNodeEditor({ workflowId: selectedWorkflow?.id })"
-              >
+              <n-button type="primary" size="large" @click="openWorkflowEditor(selectedWorkflow)">
                 <template #icon><n-icon :component="GitNetworkOutline" /></template>
-                {{ t('workflows.editAdvancedAction') }}
-              </n-button>
-              <n-button
-                secondary
-                size="large"
-                :disabled="Boolean(selectedError)"
-                @click="runSelected"
-              >
-                <template #icon><n-icon :component="PlayOutline" /></template>
-                {{ t('workflows.runWorkflowAction') }}
+                {{ t('workbench.open') }}
               </n-button>
             </div>
             <div class="wf-actionbar__more">

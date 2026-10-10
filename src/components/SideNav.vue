@@ -36,7 +36,7 @@ const bottomItems = computed(() => [
         v-for="item in mainItems"
         :key="item.name"
         class="nav-item"
-        :class="{ active: route.name === item.name }"
+        :class="{ active: route.name === item.name || (item.name === 'workflows' && route.path.startsWith('/workflow')) }"
         :to="item.path"
         :title="item.label"
       >
@@ -52,7 +52,7 @@ const bottomItems = computed(() => [
         :key="item.name"
         class="nav-item"
         :class="[
-          { active: route.name === item.name },
+          { active: route.name === item.name || (item.name === 'workflows' && route.path.startsWith('/workflow')) },
           'nav-item--utility',
           item.name === 'debug' ? 'nav-item--debug' : '',
         ]"

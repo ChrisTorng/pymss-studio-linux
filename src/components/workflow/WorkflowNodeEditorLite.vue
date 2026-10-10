@@ -35,13 +35,18 @@ import { parseModelStems } from '@/utils/workflowSimple'
 import type { ModelEntry } from '@/stores/model'
 import type { NodeSpec } from '@/litegraph/nodeSpecs'
 import { translateNodeCategory, translateNodeTitle, type NodeTranslator } from '@/litegraph/nodeLocalization'
-import { isGraphWorkflowDefinition } from '@/workflows/formats'
+import { WORKFLOW_NODE_STATUS_KEYS, type WorkflowNodeState } from '@/workflows/workbench'
+import { isGraphWorkflowDefinition, isWorkflowSaveNodeType } from '@/workflows/formats'
 import { applyGraphDefaultWidgets, type GraphDefaults } from '@/workflows/graphDefaults'
 
 // All node specs the palette offers (pymss nodes + ComfyUI builtin audio/string nodes).
 const ALL_SPECS: Record<string, NodeSpec> = { ...NODE_SPECS, ...BUILTIN_SPECS }
 
 const props = withDefaults(defineProps<{
+  readonly?: boolean
+  runtimeControls?: boolean
+  nodeStates?: Record<string, WorkflowNodeState>
+  nodeSummaries?: Record<string, string>
   modelOptions: { label: string; value: string }[]
   models: ModelEntry[]
   defaultDevice?: string
@@ -56,6 +61,8 @@ const props = withDefaults(defineProps<{
 })
 const definition = defineModel<Record<string, unknown>>('definition', { required: true })
 const emit = defineEmits<{
+  run: []
+  'runtime-node': [binding: { id: string; action: string }]
   save: [definition: Record<string, unknown>]
   close: []
   initialized: []
@@ -148,7 +155,17 @@ function redo() {
   history.value = step.history
   restoreSnapshot(step.snapshot)
 }
+function guardReadonlyKeyboard(event: KeyboardEvent) {
+  if (!props.readonly) return
+  if (canvasRef.value) canvasRef.value.read_only = true
+  event.preventDefault()
+  event.stopImmediatePropagation()
+}
+function restoreReadonlyAfterKeyup() {
+  if (props.readonly) queueMicrotask(() => { if (canvasRef.value) canvasRef.value.read_only = true })
+}
 function onCanvasKey(e: KeyboardEvent) {
+  if (props.readonly) return
   const action = resolveWorkflowHistoryShortcut(e)
   if (!action) return
   e.preventDefault()
@@ -357,6 +374,22 @@ watch(definition, () => {
 
 // --- lifecycle -------------------------------------------------------------
 let disposeCanvasDpi: (() => void) | null = null
+let executionResizeObserver: ResizeObserver | null = null
+function fitExecutionCanvas() {
+  const canvas = canvasRef.value
+  const element = canvasEl.value
+  const nodes = graphRef.value?.nodes || []
+  if (!canvas || !element || !nodes.length) return
+  const minX = Math.min(...nodes.map(node => node.pos[0]))
+  const minY = Math.min(...nodes.map(node => node.pos[1] - 30))
+  const width = Math.max(...nodes.map(node => node.pos[0] + node.size[0])) - minX
+  const height = Math.max(...nodes.map(node => node.pos[1] + node.size[1])) - minY
+  const scale = Math.max(.1, Math.min(1, (element.clientWidth - 64) / Math.max(1, width), (element.clientHeight - 64) / Math.max(1, height)))
+  canvas.ds.scale = scale
+  canvas.ds.offset[0] = (element.clientWidth / scale - width) / 2 - minX
+  canvas.ds.offset[1] = (element.clientHeight / scale - height) / 2 - minY
+  canvas.setDirty(true, true)
+}
 
 onMounted(() => {
   registerPymssNodes(nodeTranslator)
@@ -382,9 +415,15 @@ onMounted(() => {
     configureGraphNode(node)
     if (ready.value) scheduleSnap()
   }
+  if (canvasRef.value) canvasRef.value.read_only = Boolean(props.readonly)
+  document.addEventListener('keyup', restoreReadonlyAfterKeyup, true)
   canvasEl.value.addEventListener('keydown', onCanvasKey)
   // Load existing definition (e.g. reopening an editor) or seed a starter graph.
   initializeGraph()
+  if (props.readonly && typeof ResizeObserver !== 'undefined') {
+    executionResizeObserver = new ResizeObserver(fitExecutionCanvas)
+    executionResizeObserver.observe(canvasEl.value)
+  }
 })
 
 onBeforeUnmount(() => {
@@ -392,9 +431,12 @@ onBeforeUnmount(() => {
   pendingSnap = 0
   disposeCanvasDpi?.()
   disposeCanvasDpi = null
+  executionResizeObserver?.disconnect()
   canvasEl.value?.removeEventListener('keydown', onCanvasKey)
+  document.removeEventListener('keyup', restoreReadonlyAfterKeyup, true)
   try { graphRef.value?.stop?.() } catch { /* ignore */ }
   canvasRef.value?.stopRendering?.()
+  canvasRef.value?.unbindEvents()
   graphRef.value = null
   canvasRef.value = null
 })
@@ -405,7 +447,7 @@ function seedStarterGraph() {
   const load = LiteGraph.createNode('pymss_load_audio'); if (!load) return
   load.pos = [80, 200]; graph.add(load)
   const params = LiteGraph.createNode('pymss_mss_params'); if (!params) return
-  params.pos = [80, 400]; graph.add(params)
+  params.pos = [80, Math.max(400, load.pos[1] + load.size[1] + 120)]; graph.add(params)
   const sep = LiteGraph.createNode('mss_separate'); if (!sep) return
   sep.pos = [460, 280]; graph.add(sep)
   const save = LiteGraph.createNode('pymss_save_audio'); if (!save) return
@@ -462,6 +504,7 @@ watch(
 // Propagate canvas edits up to the parent v-model (debounced via rAF).
 let pendingSnap = 0
 function scheduleSnap() {
+  if (props.readonly) return
   if (pendingSnap) return
   pendingSnap = requestAnimationFrame(() => {
     pendingSnap = 0
@@ -469,6 +512,7 @@ function scheduleSnap() {
     snapshotForHistory()
   })
 }
+watch(() => props.nodeStates, () => { canvasRef.value?.setDirty(true, true) }, { deep: true })
 watch(ready, (v) => {
   if (!v || !graphRef.value) return
   ;(graphRef.value as any).onAfterChange = scheduleSnap
@@ -487,7 +531,35 @@ function onAddNodeClick(type: string) {
   paletteQuery.value = ''
 }
 
+const runtimeNodes = new WeakSet<LGraphNode>()
 function configureGraphNode(node: LGraphNode) {
+  if (!runtimeNodes.has(node)) {
+    runtimeNodes.add(node)
+    const originalDraw = node.onDrawForeground
+    node.onDrawForeground = function(ctx, ...args) {
+      const summary = node.widgets?.find(widget => widget.name === '__workbench_summary')
+      if (summary) summary.label = (props.nodeSummaries?.[String(node.id)] || t('workbench.viewNode')).slice(0, 54)
+      originalDraw?.call(this, ctx, ...args)
+      if (props.readonly && props.nodeSummaries?.[String(node.id)]) {
+        ctx.save()
+        ctx.font = '11px sans-serif'
+        ctx.fillStyle = '#d0d5dc'
+        ctx.fillText(props.nodeSummaries[String(node.id)].slice(0, Math.floor((node.size[0] - 16) / 7)), 8, node.size[1] - 34)
+        ctx.restore()
+      }
+      const state = props.nodeStates?.[String(node.id)]
+      if (state) {
+        ctx.save()
+        ctx.fillStyle = state.status === 'done' ? '#65bd8c' : state.status === 'failed' ? '#e0757e' : '#d995bb'
+        ctx.fillRect(0, node.size[1] - 4, node.size[0] * state.progress / 100, 4)
+        ctx.font = '11px sans-serif'
+        ctx.fillText(`${t(WORKFLOW_NODE_STATUS_KEYS[state.status])} ${Math.round(state.progress)}%`, 8, node.size[1] - 12)
+        ctx.restore()
+      }
+    }
+
+  }
+
   ;(node as any).onModelNameChanged = () => {
     syncSeparateNodeStems(node)
     ;(canvasRef.value as any)?.setDirty(true, true)
@@ -495,17 +567,38 @@ function configureGraphNode(node: LGraphNode) {
   syncSeparateNodeStems(node)
   refreshNodeModelOptions(node, modelValues.value)
   localizePymssNode(node, nodeTranslator)
+  if (props.runtimeControls && (['input_audio', 'pymss_load_audio', 'pymss_load_audio_batch', 'LoadAudio'].includes(String(node.type)) || isWorkflowSaveNodeType(node.type))) {
+      for (const widget of node.widgets || []) {
+        if (['audio', 'folder', 'input_name', 'output_folder', 'recursive', 'sort_files'].includes(widget.name)) {
+          widget.hidden = true
+          widget.computeLayoutSize = () => ({ minHeight: 0, maxHeight: 0, minWidth: 0 })
+        }
+      }
+    }
+  if (!props.readonly && !node.widgets?.some(widget => widget.serialize === false) && (['input_audio', 'pymss_load_audio', 'pymss_load_audio_batch', 'LoadAudio'].includes(String(node.type)) || isWorkflowSaveNodeType(node.type))) {
+    const output = isWorkflowSaveNodeType(node.type)
+
+    const actions = output ? [['workbench.chooseOutput', 'output']] : [['workbench.addFiles', 'files'], ['workbench.chooseFolder', 'folder']]
+    for (const [key, action] of actions) {
+      const picker = node.addWidget('button', t(key), '', () => emit('runtime-node', { id: String(node.id), action }))
+      picker.serialize = false
+    }
+    const summary = node.addWidget('button', '__workbench_summary', '', () => emit('runtime-node', { id: String(node.id), action: 'inspect' }))
+    summary.serialize = false
+    node.setSize([node.size[0], Math.max(node.size[1], node.computeSize()[1])])
+  }
 }
 </script>
 
 <template>
-  <div class="litegraph-editor">
-    <div class="toolbar">
+  <div class="litegraph-editor" @keydown.capture="guardReadonlyKeyboard" @keyup.capture="guardReadonlyKeyboard">
+    <div v-if="!readonly" class="toolbar">
       <n-button size="small" @click="showPalette = !showPalette">{{ t('workflows.addNode') || 'Add node' }}</n-button>
       <n-button size="small" :disabled="!canUndo" @click="undo">{{ t('common.undo') || 'Undo' }}</n-button>
       <n-button size="small" :disabled="!canRedo" @click="redo">{{ t('common.redo') || 'Redo' }}</n-button>
       <n-button size="small" @click="onSave" :disabled="!props.canSave" type="primary">{{ t('common.save') }}</n-button>
-      <n-button size="small" @click="onClose">{{ t('common.close') }}</n-button>
+      <n-button v-if="!runtimeControls" size="small" @click="emit('run')">{{ t('workbench.saveAndRun') }}</n-button>
+      <n-button v-if="!runtimeControls" size="small" @click="onClose">{{ t('common.close') }}</n-button>
       <span v-if="props.formError" class="err">{{ props.formError }}</span>
       <span v-if="props.advisory" class="warn">{{ props.advisory }}</span>
     </div>

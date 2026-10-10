@@ -124,6 +124,7 @@ function environment() {
   globalThis.window = {
     setTimeout: () => 0,
     __TAURI_INTERNALS__: {
+      metadata: { currentWindow: { label: 'main' } },
       transformCallback(handler) { callbacks.set(++callbackId, handler); return callbackId },
       async invoke(command, args) {
         if (command === 'load_app_store') {
@@ -381,6 +382,7 @@ test('standalone routes do not subscribe to main-window workflow events', async 
   for (const path of ['/editor', '/workflow-node-editor', '/workflow-simple-editor']) {
     const env = environment()
     route.path = path
+    window.__TAURI_INTERNALS__.metadata = { currentWindow: { label: 'workflow-editor' } }
     const shell = env.mount(App)
     await flush()
     assert.equal(env.listeners.size, 0, path)
@@ -707,7 +709,7 @@ test('main-window listeners that finish registering after unmount are released',
   assert.equal(env.reads.length, 0)
 })
 
-test('a main window temporarily displaying a standalone route ignores close events', async () => {
+test('the main-window workflow editor remains subscribed to workflow changes', async () => {
   const env = environment()
   await env.store.initialize()
   env.mount(App)
@@ -717,8 +719,8 @@ test('a main window temporarily displaying a standalone route ignores close even
   env.dispatch(closeEvent('simple'))
   env.dispatch('pymss://workflow-simple-editor-action', { action: 'run', workflowId: 'original' })
   await flush()
-  assert.equal(env.reads.length, 0)
-  assert.deepEqual(navigation, [])
+  assert.equal(env.reads.length, 2)
+  assert.deepEqual(navigation, [{ path: '/workflow-simple-editor', query: { workflowId: 'original' } }])
 })
 
 test('revision conflicts still reject saves without changing data or closing the editor', async () => {
@@ -1014,7 +1016,7 @@ test('the main-window run action still reloads, selects the requested workflow a
   assert.equal(env.reads.length, 1)
   assert.equal(env.store.selectedWorkflowId, 'saved')
   assert.equal(page.state.editingId, 'saved')
-  assert.deepEqual(navigation, [{ path: '/', query: { mode: 'workflow' } }])
+  assert.deepEqual(navigation, [{ path: '/workflow-simple-editor', query: { workflowId: 'saved' } }])
   assert.equal(env.writes.length, 1)
   assert.equal(env.stored.selectedWorkflowId, 'saved')
   assert.deepEqual(env.stored.workflows.map(item => item.id).sort(), ['original', 'saved'])

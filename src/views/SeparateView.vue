@@ -118,7 +118,8 @@ const workflowMetaEditor = ref<WorkflowEntry | null>(null)
 const workflowNameDraft = ref('')
 const workflowNoteDraft = ref('')
 const workflowMetaSaving = ref(false)
-if (route.query.mode === 'workflow') runMode.value = 'workflow'
+runMode.value = 'model'
+if (route.query.mode === 'workflow') void router.replace('/workflows')
 const focusedSeparationJobId = ref<string | null>(null)
 const composingNewJob = ref(false)
 const submittingJob = ref(false)
@@ -622,7 +623,7 @@ function handleSeparateContextMenuSelect(key: string | number) {
 }
 
 function workflowValidationError() {
-  if (!selectedWorkflow.value) return ''
+  if (runMode.value !== 'workflow' || !selectedWorkflow.value) return ''
   return workflowDefinitionError(selectedWorkflow.value.definition)
 }
 const workflowStructureInvalid = computed(() => runMode.value === 'workflow' && Boolean(workflowValidationError()))
@@ -1789,9 +1790,7 @@ async function start() {
   }
   submittingJob.value = true
   try {
-    const result = runMode.value === 'workflow' && selectedWorkflow.value
-      ? await task.startWorkflowInference(selectedWorkflow.value, { outputDir: normalizedOutputDir.value, outputLayout: effectiveOutputLayout.value })
-      : ensembleEnabled.value
+    const result = ensembleEnabled.value
         ? await task.startWorkflowInference(buildEnsembleWorkflow(), { outputDir: normalizedOutputDir.value, outputLayout: effectiveOutputLayout.value, outputNaming: outputNamingConfig.value })
         : await task.startSeparation({ outputDir: normalizedOutputDir.value, outputLayout: effectiveOutputLayout.value, outputNaming: outputNamingConfig.value })
     focusedSeparationJobId.value = result?.jobId || newestRunningJob.value?.id || focusedSeparationJobId.value
@@ -2003,21 +2002,8 @@ async function retryCurrentTask() {
         </div>
       </div>
       <div class="console-topbar__controls">
-        <n-radio-group
-          v-model:value="runMode"
-          class="mode-switch"
-          :disabled="isRunModeLocked"
-        >
-          <n-radio-button
-            v-for="option in runModeOptions"
-            :key="option.value"
-            :value="option.value"
-          >
-            {{ option.label }}
-          </n-radio-button>
-        </n-radio-group>
-        <n-button text class="console-topbar__manage" @click="router.push(runMode === 'workflow' ? '/workflows' : '/models')">
-          {{ runMode === 'workflow' ? t('separate.manageWorkflowsInline') : t('separate.manageModelsInline') }}
+        <n-button text class="console-topbar__manage" @click="router.push('/models')">
+          {{ t('separate.manageModelsInline') }}
         </n-button>
       </div>
     </header>
@@ -2529,60 +2515,6 @@ async function retryCurrentTask() {
                 </div>
               </div>
 
-              <div v-else key="workflow" class="target-pane">
-                <div class="target-toolbar target-toolbar--single">
-                  <n-input
-                    v-model:value="workflowSearch"
-                    clearable
-                    :placeholder="t('separate.workflowSearchPlaceholder')"
-                  >
-                    <template #prefix><n-icon :component="SearchOutline" /></template>
-                  </n-input>
-                </div>
-                <div v-if="filteredWorkflows.length" class="target-list" role="listbox" :aria-label="t('separate.workflow')">
-                  <button
-                    v-for="item in filteredWorkflows"
-                    :key="item.id"
-                    type="button"
-                    role="option"
-                    :aria-selected="selectedWorkflowId === item.id"
-                    :aria-disabled="Boolean(workflowIssue(item))"
-                    :title="workflowIssue(item) || item.name"
-                    class="target-row"
-                    :class="{
-                      'target-row--active': selectedWorkflowId === item.id,
-                      'target-row--unavailable': Boolean(workflowIssue(item)),
-                    }"
-                    @click="selectRunnableWorkflow(item)"
-                    @contextmenu.stop.prevent="openSeparateContextMenu($event, 'workflow', item)"
-                  >
-                    <span class="target-row__radio"></span>
-                    <span class="target-row__body">
-                      <span class="target-row__heading">
-                        <span class="target-row__name" :title="item.name">{{ item.name }}</span>
-                        <span v-if="workflowIssue(item)" class="target-row__unavailable">
-                          {{ t('separate.workflowUnavailable') }}
-                        </span>
-                      </span>
-                      <span class="target-row__meta">
-                        <span class="target-row__tag">{{ t('separate.workflow') }}</span>
-                        <span class="target-row__desc" :title="item.description">{{ item.description || t('separate.workflowNoDescription') }}</span>
-                      </span>
-                      <span v-if="workflowIssue(item)" class="target-row__issue">
-                        {{ workflowIssue(item) }}
-                      </span>
-                    </span>
-                  </button>
-                </div>
-                <div v-else class="stage-empty">
-                  <div class="stage-empty__glyph"><n-icon :component="GitNetworkOutline" /></div>
-                  <strong>{{ t('separate.workflowEmptyTitle') }}</strong>
-                  <p>{{ t('separate.workflowEmptyDesc') }}</p>
-                  <n-button secondary @click="router.push('/workflows')">
-                    {{ t('separate.workflowCreateAction') }}
-                  </n-button>
-                </div>
-              </div>
             </transition>
 
             <footer class="launch-bar" :class="`launch-bar--${canStart ? 'ready' : 'idle'}`">
