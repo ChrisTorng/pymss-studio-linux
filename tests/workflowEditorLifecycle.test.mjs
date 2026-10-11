@@ -300,6 +300,38 @@ afterEach(async () => {
   Reflect.deleteProperty(globalThis, 'localStorage')
 })
 
+test('overview rejects malformed simple imports without saving or changing selection', async () => {
+  const env = environment()
+  await env.store.initialize()
+  const page = env.mount(WorkflowsView)
+  const before = JSON.stringify(env.store.workflows)
+  const selected = env.store.selectedWorkflowId
+  const baselineWrites = env.writes.length
+  for (const patch of [{ model: { name: 'x' } }, { stems: { name: 'Vocals' } }, { stems: ['Vocals', 1] }]) {
+    const definition = { version: 1, steps: [{ id: 's', model: 'model.ckpt', input: 'input', stems: ['Vocals'], save: { Vocals: 'Default' }, ...patch }] }
+    const input = { value: 'selected', files: [{ name: 'invalid.json', text: async () => JSON.stringify(definition) }] }
+    await page.state.handleImportWorkflow({ target: input })
+    assert.equal(input.value, '')
+    assert.equal(env.writes.length, baselineWrites)
+    assert.equal(JSON.stringify(env.store.workflows), before)
+    assert.equal(env.store.selectedWorkflowId, selected)
+    assert.equal(messages.at(-1).level, 'error')
+    assert.match(messages.at(-1).text, /workflowImportInvalid/)
+  }
+})
+
+test('overview imports an unfinished Studio draft without requiring runnable outputs', async () => {
+  const env = environment()
+  await env.store.initialize()
+  const page = env.mount(WorkflowsView)
+  const definition = { version: 1, steps: [{ id: 's', model: '', input: 'input', stems: [], save: {} }] }
+  const input = { value: 'selected', files: [{ name: 'draft.json', text: async () => JSON.stringify(definition) }] }
+  await page.state.handleImportWorkflow({ target: input })
+  assert.equal(input.value, '')
+  assert.deepEqual(JSON.parse(JSON.stringify(env.store.selectedWorkflow.definition)), definition)
+  assert.equal(messages.at(-1).level, 'success')
+})
+
 test('overview import and export repair old graph versions without rewriting the saved definition', async () => {
   const source = JSON.parse(readFileSync(new URL('./fixtures/comfy-mss/example_ensemble.json', import.meta.url), 'utf8'))
   source.version = 1

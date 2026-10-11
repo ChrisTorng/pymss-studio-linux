@@ -154,6 +154,51 @@ test('native graph submission and retry preserve graph parameters and the output
   assert.deepEqual(retried.runConfig, JSON.parse(JSON.stringify(original.runConfig)))
 })
 
+for (const layout of ['flat', 'folders']) {
+  test(`simple workbench ${layout} output roots use the chosen directory and remain frozen on retry`, async () => {
+    storage()
+    const task = await newStore()
+    settings.outputDir = 'D:/UnavailableDefault'
+    const bindings = { inputs: { input: { files: ['D:/Audio/song.wav'] } }, outputs: {},
+      outputDirectory: 'E:/WorkflowOutput', primaryInput: 'input', outputLayout: layout }
+    const submitted = await task.startWorkbenchInference({ ...workflow, updatedAt: 1 }, bindings)
+    const first = submitted.tasks[0]
+    assert.equal(first.jobOutput, 'E:/WorkflowOutput')
+    assert.equal(first.output, layout === 'flat' ? 'E:/WorkflowOutput' : 'E:/WorkflowOutput/song')
+    assert.equal(first.runConfig.workbench.outputs['save:split:vocals'].replaceAll('\\', '/'), first.output)
+    first.status = 'failed'
+    settings.outputDir = 'F:/LaterDefault'
+    bindings.outputDirectory = 'G:/NextRun'
+    const retry = await task.retryTask(first.id)
+    assert.equal(retry.jobOutput, 'E:/WorkflowOutput')
+    assert.equal(retry.output, first.output)
+    assert.deepEqual(retry.runConfig, JSON.parse(JSON.stringify(first.runConfig)))
+  })
+}
+
+test('clearing the simple workbench directory restores the default for new runs', async () => {
+  storage()
+  const task = await newStore()
+  const submitted = await task.startWorkbenchInference(workflow, {
+    inputs: { input: { files: ['D:/Audio/song.wav'] } }, outputs: {}, primaryInput: 'input', outputLayout: 'flat',
+  })
+  assert.equal(submitted.tasks[0].jobOutput, settings.outputDir)
+})
+
+test('scoped session cleanup retains workflow records and all underlying tasks', async () => {
+  storage()
+  const task = await newStore()
+  const modelRun = await task.startSeparation()
+  const quickRun = await task.startWorkflowInference(workflow)
+  const workflowRun = await task.startWorkbenchInference(workflow, {
+    inputs: { input: { files: ['D:/Workflow.wav'] } }, outputs: {}, primaryInput: 'input', outputLayout: 'flat',
+  })
+  task.tasks.forEach(item => { item.status = 'done' })
+  assert.equal(task.clearFinishedSessionJobs([modelRun.jobId, quickRun.jobId]), 2)
+  assert.deepEqual(task.sessionJobs.map(job => job.id), [workflowRun.jobId])
+  assert.equal(task.tasks.length, 3)
+})
+
 for (const mode of ['model', 'workflow']) {
   const submit = (task, options) => mode === 'model'
     ? task.startSeparation(options)

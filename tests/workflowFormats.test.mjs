@@ -362,6 +362,35 @@ test('simple node editor keeps unselected stems available for downstream steps',
   assert.equal(canConnectSimple(draft, simpleOutputRef('step1', 'vocals'), 'save').ok, true)
 })
 
+test('simple workflows reject malformed field types before hydration or execution', () => {
+  const changes = [
+    value => { value.steps[0].model = { name: 'model.ckpt' } },
+    value => { value.steps[0].model = 17 },
+    value => { value.steps[0].id = {} },
+    value => { value.steps[0].stems = { name: 'Vocals' } },
+    value => { value.steps[0].stems = ['vocals', 17] },
+    value => { value.steps[0].stems = [['vocals']] },
+    value => { value.defaults.device = { name: 'cpu' } },
+    value => { value.defaults.output_format = 17 },
+  ]
+  for (const mutate of changes) {
+    const definition = simpleFixture()
+    mutate(definition)
+    assert.equal(getWorkflowDefinitionIssue(definition), 'invalid-definition')
+    assert.deepEqual(analyzeSimpleWorkflow(definition), { editable: false, reasonCodes: ['invalid_definition'] })
+  }
+  assert.deepEqual(analyzeSimpleWorkflow({ version: 2, steps: [] }), { editable: false, reasonCodes: ['invalid_definition'] })
+})
+
+test('unfinished Studio drafts and legacy scalar stems remain editable', () => {
+  const unfinished = { version: 1, defaults: { device: '', output_format: '' }, steps: [{ id: 's', model: '', input: 'input', stems: [], save: {} }] }
+  assert.equal(analyzeSimpleWorkflow(unfinished).editable, true)
+  assert.equal(analyzeSimpleWorkflow({ steps: [] }).editable, true)
+  const scalar = { version: 1, steps: [{ id: 's', model: 'model.ckpt', input: 'input', stems: 'Vocals', save: { Vocals: 'Default' } }] }
+  assert.equal(analyzeSimpleWorkflow(scalar).editable, true)
+  assert.deepEqual(buildSimpleWorkflowDefinition(hydrateSimpleWorkflow(scalar)).steps[0].stems, ['Vocals'])
+})
+
 test('simple editor reports collateral links and saved outputs before destructive changes', () => {
   const draft = hydrateSimpleWorkflow({
     version: 1,

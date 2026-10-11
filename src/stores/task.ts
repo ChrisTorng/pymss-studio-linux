@@ -738,9 +738,10 @@ export const useTaskStore = defineStore('task', () => {
     return removed
   }
 
-  function clearFinishedSessionJobs() {
+  function clearFinishedSessionJobs(jobIds?: readonly string[]) {
+    const allowedIds = jobIds ? new Set(jobIds) : null
     const finishedJobIds = new Set(sessionJobs.value
-      .filter(job => isTerminalTaskStatus(job.status))
+      .filter(job => isTerminalTaskStatus(job.status) && (!allowedIds || allowedIds.has(job.id)))
       .map(job => job.id))
     if (!finishedJobIds.size) return 0
     const next = new Set(sessionTaskIds.value)
@@ -2041,9 +2042,9 @@ export const useTaskStore = defineStore('task', () => {
     if (!isMainTaskOwner()) throw new Error('workbench.mainWindowOnly')
     const validationError = workflowDefinitionValidationError(workflow.definition)
     if (validationError) throw new Error(validationError)
-    const directory = resolveOutputDirectory(undefined, useSettingsStore().outputDir)
-    const prepared = prepareWorkbenchRun(workflow.definition, bindings, directory)
     const nativeGraph = detectWorkflowFormat(workflow.definition) === 'graph'
+    const directory = resolveOutputDirectory(nativeGraph ? undefined : bindings.outputDirectory, useSettingsStore().outputDir)
+    const prepared = prepareWorkbenchRun(workflow.definition, bindings, directory)
     const jobId = createRunId('job')
     const runtimeEntry = { ...workflow, definition: prepared.definition }
     const createdTasks = prepared.runs.map(run => {

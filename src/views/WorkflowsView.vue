@@ -30,7 +30,7 @@ import {
   type SimpleWorkflowReasonCode,
 } from '@/utils/workflowSimple'
 import { WorkflowEditorInUseError } from '@/utils/workflowEditorState'
-import { isGraphWorkflowDefinition, isSimpleWorkflowDefinition } from '@/workflows/formats'
+import { hasInvalidSimpleStructure, isGraphWorkflowDefinition, isSimpleWorkflowDefinition } from '@/workflows/formats'
 import { litegraphToComfy } from '@/litegraph/graphAdapter'
 import {
   countWorkflowSaveOutputs,
@@ -661,6 +661,9 @@ async function handleImportWorkflow(event: Event) {
     const text = await file.text()
     const parsed = JSON.parse(text) as Record<string, unknown>
     if (!isGraphWorkflowDefinition(parsed) && !isSimpleWorkflowDefinition(parsed)) {
+      throw new Error(t('workflows.workflowImportInvalid'))
+    }
+    if (isSimpleWorkflowDefinition(parsed) && hasInvalidSimpleStructure(parsed)) {
       throw new Error(t('workflows.workflowImportInvalid'))
     }
     const entry = await workflow.saveWorkflow({

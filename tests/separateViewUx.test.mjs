@@ -228,15 +228,62 @@ test('running batches can move to the background while a new batch is composed',
   assert.ok(scriptSource.includes('composingNewJob.value ? null : (focusedJob.value || newestRunningJob.value)'))
   assert.ok(scriptSource.includes('function beginNextSeparation()'))
   assert.ok(scriptSource.includes('function focusQueueJob(target: SeparationJob)'))
-  assert.ok(scriptSource.includes('const recentFailedJobs = computed(() => task.sessionJobs'))
+  assert.ok(scriptSource.includes('const recentFailedJobs = computed(() => separationSessionJobs.value'))
   assert.ok(scriptSource.includes('function viewQueueJobLogs(target: SeparationJob)'))
-  assert.ok(scriptSource.includes('task.clearFinishedSessionJobs()'))
+  assert.ok(scriptSource.includes('task.clearFinishedSessionJobs(separationSessionJobs.value.map(job => job.id))'))
   assert.ok(template.includes("t('separate.addNextBatch')"))
   assert.ok(template.includes('v-if="hasQueueEntries"'))
   assert.ok(template.includes('v-model:show="showQueueModal"'))
   assert.ok(template.includes('v-for="job in queueJobs"'))
   assert.ok(template.includes("job.status === 'failed'"))
   assert.ok(template.includes(':loading="submittingJob"'))
+})
+
+test('separation task views and queue actions exclude editor workflows while retaining quick Ensemble', async () => {
+  const selectedNames = new Set([
+    'isSeparationJob', 'separationJobs', 'separationSessionJobs', 'newestRunningJob',
+    'backgroundRunningJobs', 'backgroundQueuedJobs', 'completedSessionJobs', 'recentFailedJobs', 'cancelledSessionJobs',
+    'queueJobs', 'focusedJob', 'currentJob', 'focusQueueJob', 'dismissQueueJob', 'clearFinishedQueueJobs', 'cancelQueueJob',
+  ])
+  const statements = script.statements.filter(statement => ts.isFunctionDeclaration(statement)
+    ? selectedNames.has(statement.name?.text)
+    : ts.isVariableStatement(statement) && statement.declarationList.declarations.some(item => selectedNames.has(item.name.getText(script))))
+  assert.equal(statements.length, selectedNames.size)
+  const job = (id, status, config) => ({ id, status, createdAt: 1, updatedAt: 1,
+    primary: { runConfig: config }, tasks: [{ id, status, runConfig: config }] })
+  const model = job('model', 'separating', { runMode: 'model' })
+  const ensemble = job('ensemble', 'queued', { runMode: 'workflow' })
+  const workflow = job('editor', 'separating', { runMode: 'workflow', workbench: { version: 1 } })
+  const finishedWorkflow = job('finished-editor', 'done', { runMode: 'workflow', workbench: { version: 1 } })
+  workflow.createdAt = 10
+  const cleared = [], removed = [], cancelled = []
+  const task = {
+    allJobs: [model, ensemble, workflow, finishedWorkflow], sessionJobs: [model, ensemble, workflow, finishedWorkflow],
+    clearFinishedSessionJobs: ids => cleared.push(...ids), removeSessionJob: id => removed.push(id),
+    cancelTask: async id => { cancelled.push(id); return true },
+  }
+  const focusedSeparationJobId = ref('editor')
+  const composingNewJob = ref(false)
+  const logic = ts.transpileModule(statements.map(statement => statement.getText(script)).join('\n'), {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText
+  const result = vm.runInNewContext(`${logic}\n({ currentJob, queueJobs, focusQueueJob, dismissQueueJob, clearFinishedQueueJobs, cancelQueueJob })`, {
+    computed, task, focusedSeparationJobId, composingNewJob, showQueueModal: ref(true), cancellingQueueJobId: ref(null),
+  })
+  assert.equal(result.currentJob.value.id, 'model')
+  assert.deepEqual(Array.from(result.queueJobs.value, item => item.id), ['model', 'ensemble'])
+  assert.equal(result.focusQueueJob(workflow), false)
+  assert.equal(focusedSeparationJobId.value, 'editor')
+  result.dismissQueueJob(finishedWorkflow)
+  assert.deepEqual(removed, [])
+  assert.equal(await result.cancelQueueJob(workflow), false)
+  assert.deepEqual(cancelled, [])
+  result.clearFinishedQueueJobs()
+  assert.deepEqual(cleared, ['model', 'ensemble'])
+  assert.equal(result.focusQueueJob(ensemble), true)
+  assert.equal(result.currentJob.value.id, 'ensemble')
+  task.allJobs = [workflow, finishedWorkflow]
+  assert.equal(result.currentJob.value, null)
 })
 
 test('terminal task actions use state-specific hierarchy', () => {
