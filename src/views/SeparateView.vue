@@ -1949,7 +1949,7 @@ async function retryCurrentTask() {
       <div class="console-topbar__brand">
         <AppBrandMark :size="30" variant="compact" shadow />
         <div class="console-topbar__title">
-          <h1>Pymss-Studio</h1>
+          <h1>{{ t('separate.title') }}</h1>
           <span>{{ t('separate.subtitle') }}</span>
         </div>
       </div>
