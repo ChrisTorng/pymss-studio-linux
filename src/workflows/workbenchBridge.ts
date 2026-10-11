@@ -7,7 +7,7 @@ export const WORKBENCH_REQUEST = 'pymss://workflow-workbench-request'
 export const WORKBENCH_STATE = 'pymss://workflow-workbench-state'
 export type WorkbenchState = { workflowKey: string; jobs: SeparationJob[]; session?: WorkflowWorkbenchSession }
 export type WorkbenchAction = {
-  action: 'attach' | 'run' | 'cancel' | 'retry' | 'remember' | 'detach'
+  action: 'attach' | 'run' | 'cancel' | 'retry' | 'remove-run' | 'remember' | 'detach'
   workflowKey: string
   entry?: WorkflowEntry
   bindings?: WorkflowRuntimeBindings

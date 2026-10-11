@@ -289,7 +289,7 @@ with sync_playwright() as playwright:
     expect(page.locator('.run-details .run-node-detail')).to_have_count(4)
     page.keyboard.press('Escape')
     expect(page.locator('[data-workbench-details]')).to_have_count(0)
-    expect(page.locator('.graph-node-log [data-node-log="1"]')).to_be_visible()
+    expect(page.locator('.workflow-node-editor-page .workflow-node-log')).to_have_count(0)
     assert page.locator('.workflow-node-editor-page > .litegraph-editor canvas').evaluate('element=>element===window.__editingCanvas && element.data.graph===window.__editingGraph')
     assert main_canvas.evaluate('element=>({scale:element.data.ds.scale,offset:[...element.data.ds.offset],selected:Object.keys(element.data.selected_nodes)})') == canvas_state
     assert main_canvas.evaluate('element=>[...element.data.graph.getNodeById(1).pos]') == moved_position

@@ -44,9 +44,10 @@ export function initializeWorkbenchBridge() {
           return { jobId: result.jobId, total: result.total }
         }
         const target = tasks.tasks.find(task => task.runConfig?.workbench && task.runConfig.workflowId === action.workflowKey
-          && (action.action === 'cancel' ? (task.jobId || task.id) === action.jobId : task.id === action.taskId))
+          && (action.action === 'cancel' || action.action === 'remove-run' ? (task.jobId || task.id) === action.jobId : task.id === action.taskId))
         if (!target) throw new Error('workbench.runNotFound')
         if (action.action === 'cancel') { await tasks.cancelWorkbenchJob(action.jobId!); return {} }
+        if (action.action === 'remove-run') { await tasks.removeWorkflowRun(action.workflowKey, action.jobId!); return {} }
         const retry = await tasks.retryTask(action.taskId!)
         return { taskId: retry?.id, jobId: retry?.jobId || retry?.id }
       },

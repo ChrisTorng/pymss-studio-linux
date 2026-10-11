@@ -34,6 +34,12 @@ export function workflowBatchExecution(tasks: readonly SeparationTask[]) {
   const executions = tasks.map(task => {
     const definition = task.runConfig?.workbench?.sourceDefinition || task.runConfig?.workflowDefinition || {}
     const nodes = workflowVisibleNodes(definition)
+    if (Array.isArray(definition.nodes) && task.nodeExecutionOrder?.length) {
+      // Graph serialization follows editing order, not the kernel's execution order.
+      const order = new Map(task.nodeExecutionOrder.map((id, index) => [id, index]))
+      const pending = task.nodeExecutionOrder.length
+      nodes.sort((a, b) => (order.get(a.id) ?? pending) - (order.get(b.id) ?? pending))
+    }
     return { task, nodes, nodeIds: new Set(nodes.map(node => node.id)), states: visibleWorkflowNodeStates(definition, task.nodeStates),
       logs: visibleWorkflowNodeLogs(definition, task.nodeLogs) }
   })

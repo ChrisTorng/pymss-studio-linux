@@ -115,6 +115,9 @@ const noteEditorModel = ref<ModelEntry | null>(null)
 const noteDraft = ref('')
 const showWorkflowMetaEditor = ref(false)
 const showQueueModal = ref(false)
+const queueScope = ref<'session' | 'no-results'>('session')
+const removingRunRecords = ref(false)
+watch(showQueueModal, show => { if (!show) queueScope.value = 'session' })
 const workflowMetaEditor = ref<WorkflowEntry | null>(null)
 const workflowNameDraft = ref('')
 const workflowNoteDraft = ref('')
@@ -738,8 +741,14 @@ const canStart = computed(() => (
 function isSeparationJob(job: SeparationJob) {
   return !job.primary.runConfig?.workbench
 }
+function isNoResultSeparationJob(job: SeparationJob) {
+  return isSeparationJob(job) && job.tasks.every(item => ['done', 'failed', 'cancelled'].includes(item.status))
+    && !job.tasks.some(item => item.status === 'done' && !item.resultHidden && (item.outputs.length || item.files.length))
+}
 const separationJobs = computed(() => task.allJobs.filter(isSeparationJob))
 const separationSessionJobs = computed(() => task.sessionJobs.filter(isSeparationJob))
+const noResultSeparationJobs = computed(() => separationJobs.value.filter(isNoResultSeparationJob)
+  .sort((left, right) => right.updatedAt - left.updatedAt))
 const newestRunningJob = computed(() => {
   return [...separationJobs.value]
     .filter(job => job.tasks.some(item => !['done', 'failed', 'cancelled'].includes(item.status)))
@@ -760,7 +769,7 @@ const recentFailedJobs = computed(() => separationSessionJobs.value
 const cancelledSessionJobs = computed(() => separationSessionJobs.value
   .filter(job => job.status === 'cancelled')
   .sort((left, right) => right.updatedAt - left.updatedAt))
-const queueJobs = computed(() => [
+const queueJobs = computed(() => queueScope.value === 'no-results' ? noResultSeparationJobs.value : [
   ...backgroundRunningJobs.value,
   ...backgroundQueuedJobs.value,
   ...recentFailedJobs.value,
@@ -768,7 +777,7 @@ const queueJobs = computed(() => [
   ...cancelledSessionJobs.value,
 ])
 const finishedSessionJobCount = computed(() => recentFailedJobs.value.length + completedSessionJobs.value.length + cancelledSessionJobs.value.length)
-const hasQueueEntries = computed(() => queueJobs.value.length > 0)
+const hasQueueEntries = computed(() => queueJobs.value.length > 0 || noResultSeparationJobs.value.length > 0)
 const focusedJob = computed(() => separationJobs.value.find(job => job.id === focusedSeparationJobId.value) || null)
 const currentJob = computed(() => composingNewJob.value ? null : (focusedJob.value || newestRunningJob.value))
 const focusedBatchTasks = computed(() => currentJob.value?.tasks || [])
@@ -1836,6 +1845,26 @@ function clearFinishedQueueJobs() {
   task.clearFinishedSessionJobs(separationSessionJobs.value.map(job => job.id))
 }
 
+function removeSeparationRunRecords(jobs: SeparationJob[]) {
+  if (removingRunRecords.value || !jobs.length || jobs.some(job => !isNoResultSeparationJob(job))) return
+  const ids = jobs.map(job => job.id)
+  dialog.warning({
+    title: t('workbench.removeRun'), content: t('separate.removeRunRecordsContent', { count: ids.length }),
+    positiveText: t('results.removeAction'), negativeText: t('common.cancel'), positiveButtonProps: { type: 'error' },
+    onPositiveClick: async () => {
+      removingRunRecords.value = true
+      try {
+        await task.removeSeparationRuns(ids)
+        if (focusedSeparationJobId.value && ids.includes(focusedSeparationJobId.value)) {
+          showLogModal.value = false
+          focusedSeparationJobId.value = null
+        }
+      } catch (error) { message.error(error instanceof Error ? error.message : String(error)); return false }
+      finally { removingRunRecords.value = false }
+    },
+  })
+}
+
 function queueJobInputSummary(job: SeparationJob) {
   const first = getFileName(job.primary.input)
   return job.inputCount > 1
@@ -2893,14 +2922,22 @@ async function retryCurrentTask() {
       >
         <template #header-extra>
           <n-button
-            v-if="finishedSessionJobCount"
+            v-if="queueScope === 'session' && finishedSessionJobCount"
             size="small"
             quaternary
             @click="clearFinishedQueueJobs"
           >
             {{ t('separate.clearFinishedTasks') }}
           </n-button>
+          <n-button v-else-if="queueScope === 'no-results' && noResultSeparationJobs.length" size="small" quaternary type="error"
+            :loading="removingRunRecords" :disabled="removingRunRecords" @click="removeSeparationRunRecords(noResultSeparationJobs)">
+            {{ t('separate.clearNoResultHistory') }}
+          </n-button>
         </template>
+        <n-radio-group v-model:value="queueScope" size="small" class="batch-queue-scopes">
+          <n-radio-button value="session">{{ t('separate.queueCurrent') }}</n-radio-button>
+          <n-radio-button value="no-results">{{ t('separate.queueNoResultHistory') }} · {{ noResultSeparationJobs.length }}</n-radio-button>
+        </n-radio-group>
         <div v-if="queueJobs.length" class="batch-queue-list">
           <article
             v-for="job in queueJobs"
@@ -2930,7 +2967,11 @@ async function retryCurrentTask() {
                   <n-button size="small" secondary @click="job.status === 'failed' ? viewQueueJobLogs(job) : focusQueueJob(job)">
                     {{ job.status === 'failed' ? t('tasks.logs') : t('separate.viewTaskDetails') }}
                   </n-button>
-                  <n-button size="small" quaternary @click="dismissQueueJob(job)">
+                  <n-button v-if="isNoResultSeparationJob(job)" size="small" quaternary type="error"
+                    :loading="removingRunRecords" :disabled="removingRunRecords" @click="removeSeparationRunRecords([job])">
+                    {{ t('workbench.removeRun') }}
+                  </n-button>
+                  <n-button v-else size="small" quaternary @click="dismissQueueJob(job)">
                     {{ t('common.remove') }}
                   </n-button>
                 </template>
@@ -2949,7 +2990,7 @@ async function retryCurrentTask() {
             </div>
           </article>
         </div>
-        <n-empty v-else :description="t('separate.queueEmpty')" />
+        <n-empty v-else :description="t(queueScope === 'no-results' ? 'separate.queueNoResultEmpty' : 'separate.queueEmpty')" />
       </n-card>
     </n-modal>
     <n-modal v-model:show="showLogModal" style="width:min(900px, 92vw)">
@@ -2968,6 +3009,7 @@ async function retryCurrentTask() {
 
 
 <style scoped>
+.batch-queue-scopes { margin-bottom: 14px; }
 /* ============ Workstation shell ============ */
 .separate-page {
   max-width: var(--page-max-width);

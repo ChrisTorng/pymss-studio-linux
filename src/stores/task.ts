@@ -102,6 +102,7 @@ export type SeparationTask = {
   error?: string
   runConfig?: SeparationRunConfig
   nodeStates?: Record<string, WorkflowNodeState>
+  nodeExecutionOrder?: string[]
   currentNodeId?: string
   taskHidden?: boolean
   resultHidden?: boolean
@@ -404,6 +405,8 @@ function normalizeTask(task: Partial<SeparationTask>): SeparationTask {
     error: interrupted ? '应用关闭或重启导致任务中断' : task.error,
     runConfig: normalizedRunConfig,
     nodeStates: task.nodeStates,
+    nodeExecutionOrder: Array.isArray(task.nodeExecutionOrder)
+      ? [...new Set(task.nodeExecutionOrder.filter(id => typeof id === 'string' && id.trim()))] : undefined,
     nodeLogs: task.nodeLogs,
     currentNodeId: interrupted ? undefined : task.currentNodeId,
     taskHidden: task.taskHidden === true,
@@ -758,7 +761,7 @@ export const useTaskStore = defineStore('task', () => {
   async function persistTasks() {
     if (!initialized.value) return
     await saveAppStore('task-history', {
-      tasks: tasks.value.slice(0, 80).map((task) => ({ ...task, logs: task.logs.slice(-120) })),
+      tasks: tasks.value.map((task) => ({ ...task, logs: task.logs.slice(-120) })),
     } satisfies PersistedTaskState)
   }
 
@@ -767,7 +770,7 @@ export const useTaskStore = defineStore('task', () => {
     if (saveTimer) clearTimeout(saveTimer)
     saveTimer = setTimeout(() => {
       saveTimer = null
-      void persistTasks()
+      void persistTasks().catch(error => console.warn('Failed to persist task history', error))
     }, 120)
   }
 
@@ -776,7 +779,7 @@ export const useTaskStore = defineStore('task', () => {
     if (progressPersistTimer) return
     progressPersistTimer = setTimeout(() => {
       progressPersistTimer = null
-      void persistTasks()
+      void persistTasks().catch(error => console.warn('Failed to persist task history', error))
     }, 800)
   }
 
@@ -786,7 +789,8 @@ export const useTaskStore = defineStore('task', () => {
       loadAppStore<PersistedTaskState>('task-history'),
       loadAppStore<PersistedSeparateState>('separate-state'),
     ])
-    tasks.value = (stored?.tasks || []).map((task) => normalizeTask(task))
+    // Older versions retained result-page deletions as hidden task records.
+    tasks.value = (stored?.tasks || []).filter(task => !task.resultHidden).map((task) => normalizeTask(task))
     activeTaskId.value = tasks.value[0]?.id || null
     separateRunMode.value = 'model'
     ensembleEnabled.value = separateStored?.ensembleEnabled === true
@@ -829,6 +833,7 @@ export const useTaskStore = defineStore('task', () => {
         }),
     )
     initialized.value = true
+    if (stored?.tasks?.some(task => task.resultHidden)) queuePersist()
   }
 
   watch(
@@ -1407,6 +1412,65 @@ export const useTaskStore = defineStore('task', () => {
     } else if (event.type === 'task_stage') {
       const stage = normalizeStatus(event.payload?.stage)
       setTaskStatus(taskId, stage, event.payload?.message || STAGE_META[stage].label, event.payload?.progress)
+    } else if (event.type === 'workflow_execution') {
+      // Native graph execution supplies explicit lifecycle events. Do not infer
+      // node completion from a progress fraction: output collection still runs
+      // after execution_completed, and task_done remains the task terminal event.
+      if (isTerminalTaskStatus(task.status) || task.runConfig?.runMode !== 'workflow') return
+      const payload = event.payload || {}
+      const executionEvent = typeof payload.event === 'string' ? payload.event : ''
+      const knownExecutionEvent = [
+        'execution_started', 'execution_completed', 'execution_failed', 'execution_cancelled',
+        'node_started', 'node_progress', 'node_completed', 'node_failed', 'node_cancelled', 'node_skipped',
+      ].includes(executionEvent)
+      if (payload.version !== 1 || !knownExecutionEvent) return
+      const nodeEvent = executionEvent.startsWith('node_')
+      const nodeId = typeof payload.nodeId === 'string' && payload.nodeId.trim() ? payload.nodeId : undefined
+      const message = typeof payload.message === 'string' ? payload.message : ''
+      const fraction = typeof payload.overallFraction === 'number' && Number.isFinite(payload.overallFraction)
+        ? clamp(payload.overallFraction, 0, 1) : undefined
+      task.status = 'separating'
+      markTaskStarted(task)
+      task.stageLabel = STAGE_META.separating.label
+      task.message = message || STAGE_META.separating.label
+      if (fraction !== undefined) task.progress = Math.max(task.progress || 0, Math.min(90, 35 + fraction * 55))
+      const done = Number(payload.done)
+      const total = Number(payload.total)
+      if (payload.unit === 'seconds' && Number.isFinite(done) && Number.isFinite(total)) {
+        task.progressCurrent = done
+        task.progressTotal = total
+        task.progressDetail = message || undefined
+      } else {
+        task.progressCurrent = undefined
+        task.progressTotal = undefined
+        task.progressDetail = undefined
+      }
+      if (nodeId && nodeEvent) {
+        task.nodeStates ||= {}
+        const previous = task.nodeStates[nodeId]
+        if (!previous) (task.nodeExecutionOrder ||= []).push(nodeId)
+        const nodeFraction = typeof payload.nodeProgress === 'number' && Number.isFinite(payload.nodeProgress)
+          ? clamp(payload.nodeProgress, 0, 1) : undefined
+        const nodeStatus = executionEvent === 'node_completed' ? 'done'
+          : executionEvent === 'node_failed' ? 'failed'
+            : executionEvent === 'node_cancelled' ? 'cancelled'
+              : executionEvent === 'node_skipped' ? 'skipped'
+                : 'running'
+        const progress = nodeStatus === 'done' ? 100
+          : nodeFraction === undefined ? (previous?.progress || 0) : nodeFraction * 100
+        task.nodeStates[nodeId] = { status: nodeStatus, progress, ...(message ? { message } : {}) }
+        if (nodeStatus === 'running' || nodeStatus === 'failed') task.currentNodeId = nodeId
+        else if (task.currentNodeId === nodeId) task.currentNodeId = undefined
+        if (message && ['node_started', 'node_completed', 'node_failed', 'node_cancelled', 'node_skipped'].includes(executionEvent)) {
+          const prefix = executionEvent === 'node_completed' ? 'Node completed: '
+            : executionEvent === 'node_failed' ? 'Node failed: '
+              : executionEvent === 'node_cancelled' ? 'Node cancelled: '
+                : executionEvent === 'node_skipped' ? 'Node skipped: ' : 'Node started: '
+          appendWorkflowNodeLogs(task, nodeId, `[info] ${new Date().toLocaleTimeString()} ${prefix}${message}`)
+        }
+      }
+      touch(task)
+      queueProgressPersist()
     } else if (event.type === 'task_progress') {
       // Terminal states are monotonic. A worker may flush a progress line after
       // cancellation or failure has already been observed; never resurrect it.
@@ -1421,6 +1485,7 @@ export const useTaskStore = defineStore('task', () => {
         const fraction = clamp(nodeProgress, 0, 1)
         task.nodeStates ||= {}
         const previous = task.nodeStates[nodeId]
+        if (!previous) (task.nodeExecutionOrder ||= []).push(nodeId)
         const complete = fraction >= 1 && event.payload?.audioIndex == null && event.payload?.unit == null
         const status = complete ? 'done' : 'running'
         if (detail && (!previous || previous.status !== status || previous.message !== detail)) {
@@ -1707,33 +1772,64 @@ export const useTaskStore = defineStore('task', () => {
     return removed
   }
 
-  // 结果页删除：仅隐藏结果项，不影响任务页日志记录
-  function removeResult(id: string) {
-    const target = tasks.value.find((task) => task.id === id)
-    if (!target) return
-    target.resultHidden = true
-    if (focusedResultTaskId.value === id) focusedResultTaskId.value = null
-    reclaimHiddenTasks()
-    queuePersist()
+  function getRemovalTasks(ids: string[]) {
+    const selected = new Set(ids)
+    const jobs = new Set(tasks.value.filter(task => selected.has(task.id)).map(taskJobId))
+    const related = tasks.value.filter(task => jobs.has(taskJobId(task)))
+    if (related.some(task => !isTerminalTaskStatus(task.status))) {
+      throw new Error(i18n.global.t('results.removeRunningBatch'))
+    }
+    return related
   }
 
-  function removeResults(ids: string[]) {
-    const removeSet = new Set(ids)
-    if (!removeSet.size) return 0
-    let removed = 0
-    tasks.value.forEach((task) => {
-      if (removeSet.has(task.id) && !task.resultHidden) {
-        task.resultHidden = true
-        removed += 1
-      }
-    })
-    if (!removed) return 0
-    if (focusedResultTaskId.value && removeSet.has(focusedResultTaskId.value)) {
-      focusedResultTaskId.value = null
+  // Result deletion owns the complete run record, including failed siblings.
+  // Editor projects and optional file recycling are handled before this call.
+  function removeResult(id: string) {
+    return removeResults([id])
+  }
+
+  async function removeResults(ids: string[]) {
+    const related = getRemovalTasks(ids)
+    if (!related.length) return 0
+    const removedIds = new Set(related.map(task => task.id))
+    const previous = [...tasks.value]
+    tasks.value = tasks.value.filter(task => !removedIds.has(task.id))
+    try {
+      await persistTasks()
+    } catch (error) {
+      // Preserve concurrent progress and newly queued work when restoring records.
+      const current = new Map(tasks.value.map(task => [task.id, task]))
+      const previousIds = new Set(previous.map(task => task.id))
+      tasks.value = [
+        ...tasks.value.filter(task => !previousIds.has(task.id)),
+        ...previous.flatMap(task => current.has(task.id) ? [current.get(task.id)!] : removedIds.has(task.id) ? [task] : []),
+      ]
+      queuePersist()
+      throw error
     }
-    reclaimHiddenTasks()
-    queuePersist()
-    return removed
+    sessionTaskIds.value = new Set([...sessionTaskIds.value].filter(id => !removedIds.has(id)))
+    if (activeTaskId.value && removedIds.has(activeTaskId.value)) activeTaskId.value = taskBoardTasks.value[0]?.id || null
+    if (focusedTaskId.value && removedIds.has(focusedTaskId.value)) focusedTaskId.value = null
+    if (focusedResultTaskId.value && removedIds.has(focusedResultTaskId.value)) focusedResultTaskId.value = null
+    return related.length
+  }
+
+  async function removeWorkflowRun(workflowId: string, jobId: string) {
+    const job = getJobById(jobId)
+    if (!job) return
+    if (!job.tasks.every(task => task.runConfig?.workbench && task.runConfig.workflowId === workflowId)) {
+      throw new Error(i18n.global.t('workbench.runNotFound'))
+    }
+    if (job.tasks.some(hasResultPresence)) throw new Error(i18n.global.t('workbench.removeRunHasResults'))
+    await removeResults(job.tasks.map(task => task.id))
+  }
+
+  async function removeSeparationRuns(jobIds: string[]) {
+    const selected = new Set(jobIds)
+    const related = tasks.value.filter(task => selected.has(taskJobId(task)))
+    if (related.some(task => task.runConfig?.workbench)) throw new Error(i18n.global.t('workbench.runNotFound'))
+    if (related.some(hasResultPresence)) throw new Error(i18n.global.t('workbench.removeRunHasResults'))
+    return removeResults(related.map(task => task.id))
   }
 
   function clearHistory() {
@@ -1745,24 +1841,9 @@ export const useTaskStore = defineStore('task', () => {
     queuePersist()
   }
 
-  // 结果页清空：将指定结果（或全部当前可见结果）标记为 resultHidden，不影响任务页与磁盘文件
+  // Empty selections must not turn into a request to remove all results.
   function clearResults(ids?: string[]) {
-    const removeSet = ids?.length ? new Set(ids) : null
-    let removed = 0
-    tasks.value.forEach((task) => {
-      if (task.resultHidden) return
-      if (task.status !== 'done' || (!task.outputs.length && !task.files.length)) return
-      if (removeSet && !removeSet.has(task.id)) return
-      if (!task.resultHidden) {
-        task.resultHidden = true
-        removed += 1
-      }
-    })
-    if (!removed) return 0
-    focusedResultTaskId.value = null
-    reclaimHiddenTasks()
-    queuePersist()
-    return removed
+    return removeResults(ids ?? resultTasks.value.map(task => task.id))
   }
 
   async function cancelAllTasks() {
@@ -2210,6 +2291,9 @@ export const useTaskStore = defineStore('task', () => {
     clearFinishedSessionJobs,
     removeResult,
     removeResults,
+    getRemovalTasks,
+    removeWorkflowRun,
+    removeSeparationRuns,
     clearResults,
     clearHistory,
     cancelTask,

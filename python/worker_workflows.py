@@ -218,6 +218,24 @@ def _emit_progress(task_id: str, log_scope: Any = None) -> Any:
     return cb
 
 
+def _emit_execution(task_id: str, log_scope: Any = None) -> Any:
+    """Forward native lifecycle events without deriving state from progress."""
+    def cb(event: dict[str, Any]) -> None:
+        if log_scope is not None:
+            log_scope.track(event)
+        fields = {
+            "event": "event", "version": "version", "node_id": "nodeId", "node_type": "nodeType",
+            "node_fraction": "nodeProgress", "overall_fraction": "overallFraction",
+            "node_index": "nodeIndex", "node_count": "nodeCount", "message": "message",
+            "error_type": "errorType", "audio_index": "audioIndex", "audio_count": "audioCount",
+            "done": "done", "total": "total", "unit": "unit",
+        }
+        emit("workflow_execution", {target: event[source] for source, target in fields.items() if source in event},
+             task_id=task_id)
+
+    return cb
+
+
 def _prepare_workbench_outputs(dag: Any, targets: dict[str, str]) -> dict[str, str]:
     """Give each native save node a private destination without changing its filename logic."""
     import pymss.graph as graph
@@ -1247,12 +1265,17 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
         log_scope = cleanup.enter_context(workflow_logging(task_id))
         if separator_cache is None:
             separator_cache = cleanup.enter_context(graph.SeparatorCache(factory=_workflow_separator_factory))
+        # Negotiate the optional kernel protocol once. Published runtimes retain
+        # their existing progress API; errors from the new API never trigger a retry.
+        callbacks = {"execution_event_callback": _emit_execution(task_id, log_scope)} \
+            if fmt != "yaml" and getattr(graph, "EXECUTION_EVENT_VERSION", 0) >= 1 \
+            else {"progress_event_callback": _emit_progress(task_id, log_scope)}
         saved = graph.run_dag(
             dag,
             output_dir=graph_output_dir,
             input_path=input_path,
             inputs=runtime_inputs or None,
-            progress_event_callback=_emit_progress(task_id, log_scope),
+            **callbacks,
             logger=log_scope.logger,
             device=_resolve_device(payload),
             model_dir=payload.get("modelDir") or None,

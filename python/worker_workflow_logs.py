@@ -19,6 +19,13 @@ class WorkflowLogScope:
 
     def track(self, event: dict[str, Any]) -> None:
         node_id = event.get("node_id")
+        kind = event.get("event")
+        if kind:
+            if kind in {"node_started", "node_progress", "node_failed", "node_cancelled"} and node_id is not None:
+                self.local.node_id = str(node_id)
+            elif kind in {"node_completed", "node_skipped", "execution_completed", "execution_failed", "execution_cancelled"}:
+                self.local.node_id = None
+            return
         fraction = event.get("node_fraction")
         if node_id is None or not isinstance(fraction, (float, int)):
             return

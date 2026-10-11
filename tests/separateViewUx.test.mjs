@@ -241,7 +241,7 @@ test('running batches can move to the background while a new batch is composed',
 
 test('separation task views and queue actions exclude editor workflows while retaining quick Ensemble', async () => {
   const selectedNames = new Set([
-    'isSeparationJob', 'separationJobs', 'separationSessionJobs', 'newestRunningJob',
+    'isSeparationJob', 'isNoResultSeparationJob', 'separationJobs', 'separationSessionJobs', 'noResultSeparationJobs', 'newestRunningJob',
     'backgroundRunningJobs', 'backgroundQueuedJobs', 'completedSessionJobs', 'recentFailedJobs', 'cancelledSessionJobs',
     'queueJobs', 'focusedJob', 'currentJob', 'focusQueueJob', 'dismissQueueJob', 'clearFinishedQueueJobs', 'cancelQueueJob',
   ])
@@ -250,28 +250,34 @@ test('separation task views and queue actions exclude editor workflows while ret
     : ts.isVariableStatement(statement) && statement.declarationList.declarations.some(item => selectedNames.has(item.name.getText(script))))
   assert.equal(statements.length, selectedNames.size)
   const job = (id, status, config) => ({ id, status, createdAt: 1, updatedAt: 1,
-    primary: { runConfig: config }, tasks: [{ id, status, runConfig: config }] })
+    primary: { runConfig: config }, tasks: [{ id, status, runConfig: config, files: [], outputs: status === 'done' ? [{ path: 'out.wav' }] : [] }] })
   const model = job('model', 'separating', { runMode: 'model' })
   const ensemble = job('ensemble', 'queued', { runMode: 'workflow' })
   const workflow = job('editor', 'separating', { runMode: 'workflow', workbench: { version: 1 } })
   const finishedWorkflow = job('finished-editor', 'done', { runMode: 'workflow', workbench: { version: 1 } })
+  const failedModel = job('old-model', 'failed', { runMode: 'model' })
+  const cancelledEnsemble = job('old-ensemble', 'cancelled', { runMode: 'workflow' })
   workflow.createdAt = 10
   const cleared = [], removed = [], cancelled = []
   const task = {
-    allJobs: [model, ensemble, workflow, finishedWorkflow], sessionJobs: [model, ensemble, workflow, finishedWorkflow],
+    allJobs: [model, ensemble, workflow, finishedWorkflow, failedModel, cancelledEnsemble], sessionJobs: [model, ensemble, workflow, finishedWorkflow],
     clearFinishedSessionJobs: ids => cleared.push(...ids), removeSessionJob: id => removed.push(id),
     cancelTask: async id => { cancelled.push(id); return true },
   }
   const focusedSeparationJobId = ref('editor')
   const composingNewJob = ref(false)
+  const queueScope = ref('session')
   const logic = ts.transpileModule(statements.map(statement => statement.getText(script)).join('\n'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText
   const result = vm.runInNewContext(`${logic}\n({ currentJob, queueJobs, focusQueueJob, dismissQueueJob, clearFinishedQueueJobs, cancelQueueJob })`, {
-    computed, task, focusedSeparationJobId, composingNewJob, showQueueModal: ref(true), cancellingQueueJobId: ref(null),
+    computed, task, focusedSeparationJobId, composingNewJob, queueScope, showQueueModal: ref(true), cancellingQueueJobId: ref(null),
   })
   assert.equal(result.currentJob.value.id, 'model')
   assert.deepEqual(Array.from(result.queueJobs.value, item => item.id), ['model', 'ensemble'])
+  queueScope.value = 'no-results'
+  assert.deepEqual(Array.from(result.queueJobs.value, item => item.id), ['old-model', 'old-ensemble'])
+  queueScope.value = 'session'
   assert.equal(result.focusQueueJob(workflow), false)
   assert.equal(focusedSeparationJobId.value, 'editor')
   result.dismissQueueJob(finishedWorkflow)

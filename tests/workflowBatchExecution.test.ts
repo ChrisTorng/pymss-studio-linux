@@ -80,3 +80,37 @@ test('native nodes retain their own identities and old history with no node even
   assert.equal(result.states['2'].summary?.unknown, 1)
   assert.deepEqual(result.nodes.map(node => node.id), ['1', '2'])
 })
+
+test('native node details follow recorded execution rather than JSON array or numeric id order', () => {
+  const native = task('native', 'done')
+  native.runConfig!.workbench!.sourceDefinition = { nodes: [
+    { id: 3, type: 'pymss_mss_separate' }, { id: 4, type: 'pymss_save_audio' },
+    { id: 10, type: 'pymss_load_audio' }, { id: 2, type: 'pymss_mss_params' },
+  ], links: [] }
+  native.nodeExecutionOrder = ['10', '2', '3', '4']
+  const snapshot = JSON.stringify(native)
+  const restored = JSON.parse(snapshot)
+  const result = workflowBatchExecution([restored])
+  assert.deepEqual(result.nodes.map(node => node.id), ['10', '2', '3', '4'])
+  assert.equal(JSON.stringify(restored), snapshot)
+})
+
+test('native nodes with no execution event follow observed nodes without inventing an execution order', () => {
+  const native = task('native', 'failed')
+  native.runConfig!.workbench!.sourceDefinition = { nodes: [
+    { id: 3, type: 'pymss_mss_separate' }, { id: 4, type: 'pymss_save_audio' },
+    { id: 10, type: 'pymss_load_audio' }, { id: 2, type: 'pymss_mss_params' },
+  ], links: [] }
+  native.nodeExecutionOrder = ['10', '2', '3']
+  assert.deepEqual(workflowBatchExecution([native]).nodes.map(node => node.id), ['10', '2', '3', '4'])
+  native.nodeExecutionOrder = ['10']
+  assert.deepEqual(workflowBatchExecution([native]).nodes.map(node => node.id), ['10', '3', '4', '2'])
+  delete native.nodeExecutionOrder
+  assert.deepEqual(workflowBatchExecution([native]).nodes.map(node => node.id), ['3', '4', '10', '2'])
+})
+
+test('simple node details keep the grouped input, steps and output layout', () => {
+  const simple = task('simple', 'done', 'done')
+  simple.nodeExecutionOrder = ['input', 'step:split', 'save:split:Vocals']
+  assert.deepEqual(workflowBatchExecution([simple]).nodes.map(node => node.id), ['input', 'split', 'save'])
+})

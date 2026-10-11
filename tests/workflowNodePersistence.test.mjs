@@ -13,7 +13,8 @@ const { storeGraphDefaults } = await vite.ssrLoadModule('/src/workflows/graphDef
 
 const descriptor = parse(readFileSync(new URL('../src/views/WorkflowNodeEditorView.vue', import.meta.url), 'utf8')).descriptor
 const source = ts.createSourceFile('view.ts', descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true)
-const names = new Set(['snapshot', 'captureInitialSnapshot', 'syncCurrentDefinition', 'createFreshDefinition', 'loadWorkflow', 'persistDefinition', 'save', 'saveRevisionConflictCopy', 'overwriteRevisionConflict', 'canSave'])
+const names = new Set(['snapshot', 'captureInitialSnapshot', 'syncCurrentDefinition', 'createFreshDefinition', 'loadWorkflow', 'persistDefinition', 'save', 'saveRevisionConflictCopy', 'overwriteRevisionConflict', 'canSave',
+  'cancelAutosave', 'scheduleAutosave', 'autosaveTimer', 'saveQueue', 'pendingSaves', 'saveGeneration', 'disposed'])
 const statements = source.statements.filter(statement => ts.isFunctionDeclaration(statement)
   ? names.has(statement.name?.text)
   : ts.isVariableStatement(statement) && statement.declarationList.declarations.some(item => names.has(item.name.getText(source))))
@@ -35,8 +36,9 @@ function environment(query = {}) {
     route: { query }, workflows: ref([entry]),
     name: ref('Current'), description: ref(''), definition: ref(graph('Original')),
     defaultDevice: ref('auto'), defaultFormat: ref('wav'),
-    editingId: ref('existing'), loadedUpdatedAt: ref(1), loaded: ref(false),
-    saving: ref(false), formError: ref(''), formatError: ref(''), initialSnapshot: ref(''),
+    editingId: ref('existing'), loadedUpdatedAt: ref(1), loaded: ref(true), canvasInitialized: ref(true),
+    saving: ref(false), formError: ref(''), formatError: ref(''), canvasError: ref(''), initialSnapshot: ref(''),
+    saveError: ref(''), closing: ref(false), submitting: ref(false), editingName: ref(false), showClosePrompt: ref(false), dirty: ref(true),
     pendingDefinition: ref(null), showRevisionConflict: ref(false), editorKey: ref(0),
     editorRef: ref({ snapshotDefinition: () => canvas }),
     cloneWorkflow: plain, storeGraphDefaults,
@@ -49,6 +51,7 @@ function environment(query = {}) {
     } },
     workbench: { adoptWorkflowKey() {} }, message: { success() {}, error() {} },
     refreshMaximized: async () => {}, currentWindow: null,
+    setTimeout: () => 0, clearTimeout() {},
     onMounted: callback => { mounted = callback },
   }
   const result = vm.runInNewContext(`${code}\n({ save, saveRevisionConflictCopy, overwriteRevisionConflict, persistDefinition })`, state)

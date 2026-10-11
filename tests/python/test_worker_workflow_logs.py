@@ -41,6 +41,20 @@ class WorkflowNodeLogTests(unittest.TestCase):
         self.assertEqual(self.logger.handlers, [self.console])
         self.assertEqual(self.console.filters, [])
 
+    def test_native_lifecycle_does_not_end_the_node_on_full_audio_progress(self):
+        with patch.dict(sys.modules, {"pymss": self.pymss}), patch.object(worker_infer, "emit") as emit:
+            with workflow_logging("advanced") as scope:
+                scope.track({"event": "node_started", "node_id": "split", "node_fraction": 0})
+                scope.track({"event": "node_progress", "node_id": "split", "node_fraction": 1})
+                self.logger.info("Finishing current node")
+                scope.track({"event": "node_completed", "node_id": "split", "node_fraction": 1})
+                self.logger.info("Between nodes")
+                scope.track({"event": "node_failed", "node_id": "save", "node_fraction": 0})
+                self.logger.error("Save failed")
+                scope.track({"event": "execution_failed", "node_id": "save"})
+                self.logger.info("Releasing model")
+        self.assertEqual([call.args[1].get("nodeId") for call in emit.call_args_list], ["split", None, "save", None])
+
     def test_background_thread_logs_do_not_inherit_a_foreground_node(self):
         with patch.dict(sys.modules, {"pymss": self.pymss}), patch.object(worker_infer, "emit") as emit:
             with workflow_logging("file-one") as scope:

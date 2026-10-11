@@ -106,8 +106,10 @@ with sync_playwright() as playwright:
             links = canvas.evaluate('e => e.data.graph.serialize().links.length')
             assert links == ports['links']+1, {'ratio':ratio,'ports':ports,'links':links}
 
+            # The load node can overlap the nearby params title after dragging;
+            # use the isolated save node to check marquee coordinates precisely.
             selection = canvas.evaluate('''e => {
-              const editor=e.data,node=editor.graph.nodes.find(n=>n.type==='pymss_load_audio')
+              const editor=e.data,node=editor.graph.nodes.find(n=>n.type==='pymss_save_audio')
               editor.deselectAll()
               const r=e.getBoundingClientRect()
               const screen=p=>{const c=editor.ds.convertOffsetToCanvas(p);return [r.left+c[0],r.top+c[1]]}

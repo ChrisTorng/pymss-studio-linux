@@ -167,6 +167,22 @@ function groupTaskIdTitle(group: ResultGroup) {
   return groupTaskIds(group).join('\n')
 }
 
+function removalItems(ids: string[]) {
+  try { return task.getRemovalTasks(ids) }
+  catch (error) { message.warning(String(error instanceof Error ? error.message : error)); return null }
+}
+
+async function removeResultRecords(items: SeparationTask[]) {
+  if (!await cleanupLinkedEditorProjects(items)) return false
+  try {
+    await task.removeResults(items.map(item => item.id))
+    return true
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : t('results.removeRecordsFailed'))
+    return false
+  }
+}
+
 async function cleanupLinkedEditorProjects(items: SeparationTask[]) {
   try {
     const result = await editor.deleteProjectsForTasks(items.map(item => item.id))
@@ -305,6 +321,8 @@ function confirmRemoveListOnly(failedCount: number, totalCount: number, mode: Re
 
 function handleRemoveResult(group: ResultGroup) {
   const ids = groupTaskIds(group)
+  const items = removalItems(ids)
+  if (!items?.length) return
   const deleteFiles = ref(false)
   dialog.warning({
     title: t('results.removeTitle'),
@@ -321,28 +339,26 @@ function handleRemoveResult(group: ResultGroup) {
     positiveButtonProps: { type: 'error' },
     onPositiveClick: async () => {
       const finishRemove = async () => {
-        if (!await cleanupLinkedEditorProjects(group.items)) return false
-        task.removeResults(ids)
-        return true
+        return removeResultRecords(items)
       }
       if (!deleteFiles.value) {
-        if (!await finishRemove()) return
+        if (!await finishRemove()) return false
         message.success(t('results.removeSuccess'))
         return
       }
-      if (!await ensureLinkedEditorProjectsClosed(group.items)) return false
+      if (!await ensureLinkedEditorProjectsClosed(items)) return false
 
-      const targets = trashTargetsForItems(group.items)
+      const targets = trashTargetsForItems(items)
       if (!targets.length) {
-        if (!await finishRemove()) return
+        if (!await finishRemove()) return false
         message.warning(t('results.removeNoFilesSingle'))
         return
       }
 
       try {
-        const result = await task.trashResultPaths(targets, trashEmptyDirsForItems(group.items))
+        const result = await task.trashResultPaths(targets, trashEmptyDirsForItems(items))
         if (!result.failed.length) {
-          if (!await finishRemove()) return
+          if (!await finishRemove()) return false
           message.success(t('results.removeFilesSuccessSingle'))
           return
         }
@@ -352,7 +368,7 @@ function handleRemoveResult(group: ResultGroup) {
           message.warning(t('results.removeFilesKeptSingle'))
           return
         }
-        if (!await finishRemove()) return
+        if (!await finishRemove()) return false
         if (result.failed.length === targets.length) {
           message.warning(t('results.removeFilesAllFailedListOnly'))
         } else {
@@ -364,7 +380,7 @@ function handleRemoveResult(group: ResultGroup) {
           message.error(error instanceof Error ? error.message : t('results.removeFilesFailed'))
           return
         }
-        if (!await finishRemove()) return
+        if (!await finishRemove()) return false
         message.warning(t('results.removeFilesAllFailedListOnly'))
       }
     },
@@ -376,7 +392,8 @@ function handleRemoveSelected() {
   if (!ids.length) return
   const groups = resultGroups.value.filter((group) => ids.includes(group.id))
   const taskIds = groups.flatMap(groupTaskIds)
-  const items = groups.flatMap(group => group.items)
+  const items = removalItems(taskIds)
+  if (!items?.length) return
   const deleteFiles = ref(false)
   dialog.warning({
     title: t('results.removeSelectedTitle'),
@@ -393,9 +410,8 @@ function handleRemoveSelected() {
     positiveButtonProps: { type: 'error' },
     onPositiveClick: async () => {
       const finishRemove = async (silent = false) => {
-        if (!await cleanupLinkedEditorProjects(items)) return false
-        const removed = task.removeResults(taskIds)
-        if (!silent && removed > 0) {
+        if (!await removeResultRecords(items)) return false
+        if (!silent) {
           message.success(t('results.removeSelectedSuccess', { count: ids.length }))
         }
         selectedResultIds.value = []
@@ -404,14 +420,13 @@ function handleRemoveSelected() {
       }
 
       if (!deleteFiles.value) {
-        await finishRemove()
-        return
+        return await finishRemove() ? undefined : false
       }
       if (!await ensureLinkedEditorProjectsClosed(items)) return false
 
       const targets = trashTargetsForItems(items)
       if (!targets.length) {
-        if (!await finishRemove(true)) return
+        if (!await finishRemove(true)) return false
         message.warning(t('results.removeNoFilesMultiple'))
         return
       }
@@ -419,7 +434,7 @@ function handleRemoveSelected() {
       try {
         const result = await task.trashResultPaths(targets, trashEmptyDirsForItems(items))
         if (!result.failed.length) {
-          if (!await finishRemove(true)) return
+          if (!await finishRemove(true)) return false
           message.success(t('results.removeFilesSuccessMultiple'))
           return
         }
@@ -429,7 +444,7 @@ function handleRemoveSelected() {
           message.warning(t('results.removeFilesKeptMultiple'))
           return
         }
-        if (!await finishRemove(true)) return
+        if (!await finishRemove(true)) return false
         if (result.failed.length === targets.length) {
           message.warning(t('results.removeFilesAllFailedListOnly'))
         } else {
@@ -441,7 +456,7 @@ function handleRemoveSelected() {
           message.error(error instanceof Error ? error.message : t('results.removeFilesFailed'))
           return
         }
-        if (!await finishRemove(true)) return
+        if (!await finishRemove(true)) return false
         message.warning(t('results.removeFilesAllFailedListOnly'))
       }
     },
@@ -451,7 +466,8 @@ function handleRemoveSelected() {
 function handleClearResults() {
   const groups = [...resultGroups.value]
   if (!groups.length) return
-  const items = groups.flatMap(group => group.items)
+  const items = removalItems(groups.flatMap(groupTaskIds))
+  if (!items?.length) return
   const deleteFiles = ref(false)
   dialog.warning({
     title: t('results.clearTitle'),
@@ -467,11 +483,9 @@ function handleClearResults() {
     negativeText: t('common.cancel'),
     positiveButtonProps: { type: 'error' },
     onPositiveClick: async () => {
-      const itemIds = items.map((item) => item.id)
       const finishClear = async (silent = false) => {
-        if (!await cleanupLinkedEditorProjects(items)) return false
-        const removed = task.clearResults(itemIds)
-        if (!silent && removed > 0) {
+        if (!await removeResultRecords(items)) return false
+        if (!silent) {
           message.success(t('results.clearSuccess', { count: groups.length }))
         }
         selectedResultIds.value = []
@@ -480,14 +494,13 @@ function handleClearResults() {
       }
 
       if (!deleteFiles.value) {
-        await finishClear()
-        return
+        return await finishClear() ? undefined : false
       }
       if (!await ensureLinkedEditorProjectsClosed(items)) return false
 
       const targets = trashTargetsForItems(items)
       if (!targets.length) {
-        if (!await finishClear(true)) return
+        if (!await finishClear(true)) return false
         message.warning(t('results.removeNoFilesMultiple'))
         return
       }
@@ -495,7 +508,7 @@ function handleClearResults() {
       try {
         const result = await task.trashResultPaths(targets, trashEmptyDirsForItems(items))
         if (!result.failed.length) {
-          if (!await finishClear(true)) return
+          if (!await finishClear(true)) return false
           message.success(t('results.removeFilesSuccessMultiple'))
           return
         }
@@ -505,7 +518,7 @@ function handleClearResults() {
           message.warning(t('results.removeFilesKeptMultiple'))
           return
         }
-        if (!await finishClear(true)) return
+        if (!await finishClear(true)) return false
         if (result.failed.length === targets.length) {
           message.warning(t('results.removeFilesAllFailedListOnly'))
         } else {
@@ -517,7 +530,7 @@ function handleClearResults() {
           message.error(error instanceof Error ? error.message : t('results.removeFilesFailed'))
           return
         }
-        if (!await finishClear(true)) return
+        if (!await finishClear(true)) return false
         message.warning(t('results.removeFilesAllFailedListOnly'))
       }
     },

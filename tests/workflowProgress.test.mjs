@@ -34,8 +34,29 @@ function setup() {
   return {
     task,
     progress: payload => handle({ type: 'task_progress', taskId: task.id, payload: { stage: 'separating', ...payload } }),
+    execution: payload => handle({ type: 'workflow_execution', taskId: task.id, payload }),
     event: (type, payload) => handle({ type, taskId: task.id, payload }),
   }
+}
+
+for (const protocol of ['progress', 'execution']) {
+  test(`${protocol} events retain first-seen node order across updates and failure`, () => {
+    const { task, progress, execution, event } = setup()
+    task.runConfig.runMode = 'workflow'
+    const send = (nodeId, fraction) => protocol === 'progress'
+      ? progress({ nodeId, nodeProgress: fraction, message: 'Processing audio' })
+      : execution({ version: 1, event: fraction === 0 ? 'node_started' : fraction === 1 ? 'node_completed' : 'node_progress',
+        nodeId, nodeProgress: fraction })
+    for (const id of ['10', '2', '3']) {
+      send(id, 0)
+      send(id, 0.5)
+      send(id, 1)
+    }
+    send('4', 0)
+    event('error', { message: 'Save failed' })
+    send('20', 0)
+    assert.deepEqual(Array.from(task.nodeExecutionOrder || []), ['10', '2', '3', '4'])
+  })
 }
 
 test('workflow percentage uses overall progress while audio time stays local to the node', () => {
@@ -111,4 +132,63 @@ test('finishing audio does not complete a node before its output handling return
   event('error', { message: 'Missing output stem' })
   assert.equal(task.nodeStates.first.status, 'failed')
   assert.ok(task.nodeLogs.first.some(line => line.includes('Missing output stem')))
+})
+
+test('workflow execution uses explicit node lifecycle without making task completion terminal', () => {
+  const { task, execution } = setup()
+  task.runConfig = { runMode: 'workflow', workbench: { nativeGraph: true } }
+  execution({ version: 1, event: 'node_started', nodeId: 'save', nodeProgress: 0, overallFraction: 0, message: 'Writing output' })
+  assert.equal(task.nodeStates.save.status, 'running')
+  assert.equal(task.currentNodeId, 'save')
+  assert.equal(task.progress, 35)
+  execution({ version: 1, event: 'node_completed', nodeId: 'save', nodeProgress: 1, overallFraction: 1, message: 'Saved' })
+  assert.equal(task.nodeStates.save.status, 'done')
+  assert.equal(task.nodeStates.save.progress, 100)
+  assert.equal(task.currentNodeId, undefined)
+  assert.equal(task.status, 'separating')
+  assert.equal(task.progress, 90)
+  assert.ok(task.nodeLogs.save.some(line => line.includes('Node completed: Saved')))
+})
+
+test('workflow node failure remains failed through execution failure until the error detail arrives', () => {
+  const { task, execution, event } = setup()
+  task.runConfig = { runMode: 'workflow', workbench: { nativeGraph: true } }
+  execution({ version: 1, event: 'node_failed', nodeId: 'split', overallFraction: .3, message: 'Model execution failed' })
+  assert.equal(task.nodeStates.split.status, 'failed')
+  assert.equal(task.currentNodeId, 'split')
+  execution({ version: 1, event: 'execution_failed', nodeId: 'split', overallFraction: .3, message: 'Workflow failed' })
+  assert.equal(task.nodeStates.split.status, 'failed')
+  assert.equal(task.currentNodeId, 'split')
+  event('error', { message: 'Model execution failed', detail: 'Traceback: detail' })
+  assert.equal(task.nodeStates.split.status, 'failed')
+  assert.ok(task.nodeLogs.split.some(line => line.includes('Traceback: detail')))
+})
+
+test('workflow execution ignores non-second counters and late events after cancellation', () => {
+  const { task, execution, event } = setup()
+  task.runConfig = { runMode: 'workflow', workbench: { nativeGraph: true } }
+  execution({ version: 1, event: 'node_progress', nodeId: 'split', nodeProgress: .4, overallFraction: .4, done: 4, total: 10, unit: 'chunks' })
+  assert.equal(task.progressCurrent, undefined)
+  assert.equal(task.progressTotal, undefined)
+  execution({ version: 1, event: 'node_progress', nodeId: 'split', nodeProgress: .5, overallFraction: .5, done: 2, total: 5, unit: 'seconds' })
+  assert.equal(task.progressCurrent, 2)
+  assert.equal(task.progressTotal, 5)
+  event('task_cancelled', { message: 'Cancelled' })
+  execution({ version: 1, event: 'node_completed', nodeId: 'split', overallFraction: 1, message: 'Late success' })
+  assert.equal(task.status, 'cancelled')
+  assert.equal(task.nodeStates.split.status, 'cancelled')
+})
+
+test('execution cancellation and unknown payloads do not overwrite an explicit cancelled node', () => {
+  const { task, execution } = setup()
+  task.runConfig = { runMode: 'workflow' }
+  execution({ version: 1, event: 'node_cancelled', nodeId: 'split', overallFraction: .4, message: 'Node cancelled' })
+  assert.equal(task.nodeStates.split.status, 'cancelled')
+  execution({ version: 1, event: 'execution_cancelled', nodeId: 'split', overallFraction: .4, message: 'Workflow cancelled' })
+  assert.equal(task.nodeStates.split.status, 'cancelled')
+  const before = task.progress
+  execution({ version: 99, event: 'node_progress', nodeId: 'split', overallFraction: .8 })
+  execution({ version: 1, event: 'future_event', nodeId: 'split', overallFraction: .8 })
+  assert.equal(task.nodeStates.split.status, 'cancelled')
+  assert.equal(task.progress, before)
 })

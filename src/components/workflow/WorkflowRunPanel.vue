@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useMessage } from 'naive-ui'
-import { DocumentTextOutline } from '@vicons/ionicons5'
+import { useDialog, useMessage } from 'naive-ui'
+import { DocumentTextOutline, TrashOutline } from '@vicons/ionicons5'
 import TaskLogConsole from '@/components/TaskLogConsole.vue'
 import WorkflowNodeLog from '@/components/workflow/WorkflowNodeLog.vue'
 import WorkflowExecutionProgress from '@/components/workflow/WorkflowExecutionProgress.vue'
@@ -23,6 +23,7 @@ const task = useTaskStore()
 const workbench = useWorkbenchStore()
 const { t } = useI18n()
 const message = useMessage()
+const dialog = useDialog()
 const showDetails = ref(false)
 const detailsTab = ref('logs')
 const session = computed(() => workbench.session(props.workflowKey))
@@ -31,8 +32,12 @@ const jobs = computed(() => owner
   ? task.allJobs.filter(job => job.primary.runConfig?.workbench && job.primary.runConfig.workflowId === props.workflowKey)
   : workbench.remoteJobs[props.workflowKey] || [])
 const currentJob = computed(() => selectedWorkflowJob(jobs.value, jobId.value))
+watch(() => currentJob.value?.id, id => { if (!id) showDetails.value = false })
 const batchTasks = computed(() => currentJob.value?.tasks || [])
 const active = computed(() => batchTasks.value.some(item => !isTerminalTaskStatus(item.status)))
+const canRemoveRun = computed(() => Boolean(currentJob.value) && !active.value
+  && !batchTasks.value.some(item => item.status === 'done' && !item.resultHidden && (item.outputs.length || item.files.length)))
+const removingRun = ref(false)
 const batchStatus = computed(() => resolveJobStatus(batchTasks.value))
 const batchLogs = computed(() => batchTasks.value.flatMap((item, index) => [
   ...(batchTasks.value.length > 1 ? [`[info] ── ${index + 1}. ${workflowTaskLabel(item)} ──`] : []),
@@ -72,6 +77,24 @@ async function retry(item: SeparationTask) {
   } catch (error) { message.error(String(error)) }
   finally { retrying.value = '' }
 }
+
+function removeCurrentRun() {
+  const target = currentJob.value
+  if (!target || !canRemoveRun.value || removingRun.value) return
+  dialog.warning({
+    title: t('workbench.removeRun'), content: t('workbench.removeRunContent'),
+    positiveText: t('results.removeAction'), negativeText: t('common.cancel'), positiveButtonProps: { type: 'error' },
+    onPositiveClick: async () => {
+      removingRun.value = true
+      try {
+        if (owner) await task.removeWorkflowRun(props.workflowKey, target.id)
+        else await requestWorkbenchAction({ action: 'remove-run', workflowKey: props.workflowKey, jobId: target.id })
+        if (jobId.value === target.id) { jobId.value = ''; session.value.selectedTaskId = '' }
+      } catch (error) { message.error(String(error)); return false }
+      finally { removingRun.value = false }
+    },
+  })
+}
 </script>
 
 <template>
@@ -89,8 +112,9 @@ async function retry(item: SeparationTask) {
     </span>
     <n-modal v-model:show="showDetails" preset="card" :title="t('workbench.details')" class="workflow-run-details-modal" style="width: min(960px, calc(100vw - 48px))">
       <div class="run-details" data-workbench-details>
-        <div v-if="jobs.length > 1" class="run-detail-selection">
-          <label><span>{{ t('workbench.chooseRun') }}</span><n-select :value="currentJob?.id" :options="jobOptions" size="small" @update:value="jobId = $event; session.selectedTaskId = ''" /></label>
+        <div v-if="jobs.length > 1 || canRemoveRun" class="run-detail-selection">
+          <label v-if="jobs.length > 1"><span>{{ t('workbench.chooseRun') }}</span><n-select :value="currentJob?.id" :options="jobOptions" size="small" @update:value="jobId = $event; session.selectedTaskId = ''" /></label>
+          <n-button v-if="canRemoveRun" size="small" secondary type="error" :loading="removingRun" :disabled="removingRun" @click="removeCurrentRun"><template #icon><n-icon :component="TrashOutline" /></template>{{ t('workbench.removeRun') }}</n-button>
         </div>
         <template v-if="currentJob">
           <WorkflowExecutionProgress :job="currentJob" />
@@ -126,8 +150,8 @@ async function retry(item: SeparationTask) {
 .run-actions { display: inline-flex; align-items: center; gap: 12px; }
 .run-details-trigger + .run-actions { padding-left: 10px; border-left: 1px solid var(--outline); }
 .run-details { display: grid; gap: 16px; max-height: calc(100vh - 180px); overflow-y: auto; }
-.run-detail-selection { max-width: 480px; }
-.run-detail-selection label { display: grid; gap: 6px; min-width: 0; }
+.run-detail-selection { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; }
+.run-detail-selection label { display: grid; gap: 6px; min-width: 0; flex: 1; max-width: 480px; }
 .run-detail-selection label > span { color: var(--on-surface-muted); font-size: 11px; }
 .run-node-list { display: grid; gap: 10px; }
 .run-node-detail { padding: 12px; border: 1px solid var(--outline); border-radius: 10px; }

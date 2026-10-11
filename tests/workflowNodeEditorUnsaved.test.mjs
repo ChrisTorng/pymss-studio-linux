@@ -24,6 +24,7 @@ const names = new Set([
   'saveAndClose',
   'runPromise',
   'runWorkflow',
+  'flushChanges',
 ])
 const selected = script.statements.filter(statement => (
   ts.isFunctionDeclaration(statement) ? names.has(statement.name?.text)
@@ -62,14 +63,20 @@ function createContext() {
     editorRef: ref({ snapshotDefinition: () => canvasDefinition }),
     showClosePrompt: ref(false),
     saving: ref(false),
+    closing: ref(false), editingId: ref('flow'), showRevisionConflict: ref(false),
+    saveQueue: Promise.resolve(), cancelAutosave() {}, scheduleAutosave() {}, finishNameEdit() {},
     formError: ref(''),
     currentWindow: null,
     invoke: async () => {},
     router: { push: async target => navigation.push(target) },
     message: { warning: value => warnings.push(value) },
-    save: async () => saveResult,
+    save: async () => {
+      if (saveResult) result.captureInitialSnapshot()
+      return saveResult
+    },
     workbench: { run: async () => {} },
   }
+  context.canSave = computed(() => !context.formError.value)
   const result = vm.runInNewContext(
     `${code}\n({ dirty, captureInitialSnapshot, closeEditor, saveAndClose, runWorkflow })`,
     context,
@@ -94,7 +101,7 @@ test('advanced editor exposes the same unsaved-close actions as the simple edito
   assert.ok(editorScript.includes("emit('initialized')"))
 })
 
-test('advanced editor flushes the live canvas before deciding whether to close', async () => {
+test('advanced editor saves the live canvas before closing', async () => {
   const state = createContext()
   state.result.captureInitialSnapshot()
   assert.equal(state.result.dirty.value, false)
@@ -102,9 +109,9 @@ test('advanced editor flushes the live canvas before deciding whether to close',
   state.setCanvasDefinition({ nodes: [{ id: 1 }, { id: 2 }], links: [] })
   await state.result.closeEditor()
 
-  assert.equal(state.result.dirty.value, true)
-  assert.equal(state.context.showClosePrompt.value, true)
-  assert.deepEqual(state.navigation, [])
+  assert.equal(state.result.dirty.value, false)
+  assert.equal(state.context.showClosePrompt.value, false)
+  assert.deepEqual(state.navigation, ['/workflows'])
 })
 
 test('advanced editor closes only after a successful save and keeps invalid drafts open', async () => {

@@ -56,6 +56,7 @@ async function environment(t: any, preserveInputs = false) {
         return { jobId: 'job-1', total: 1 }
       }
       if (action.action === 'cancel') state.jobs[0].tasks[0].status = 'cancelled'
+      if (action.action === 'remove-run') state.jobs = state.jobs.filter(job => job.id !== action.jobId)
       return { jobId: action.jobId || 'retry-1', taskId: action.taskId }
     },
   } })
@@ -84,12 +85,13 @@ test('node progress and output folders update the mirror while preserving the ne
   await env.editor.attach('a')
   await env.editor.request({ action: 'run', workflowKey: 'a', bindings: env.mirror.session('a').bindings })
   env.mirror.session('a').bindings.inputs.input.files = ['D:/next.wav']
-  env.state.jobs[0].tasks[0] = { id: 'task-1', status: 'done', nodeStates: { '1': { status: 'done', progress: 100 } }, outputs: [{ path: 'D:/out/song.wav' }], outputDirectories: ['D:/out'] }
+  env.state.jobs[0].tasks[0] = { id: 'task-1', status: 'done', nodeStates: { '1': { status: 'done', progress: 100 } }, nodeExecutionOrder: ['10', '1'], outputs: [{ path: 'D:/out/song.wav' }], outputDirectories: ['D:/out'] }
   await nextTick()
   await new Promise(resolve => setTimeout(resolve, 130))
   const mirrored = env.mirror.remoteJobs.a[0].tasks[0]
   assert.equal(mirrored.status, 'done')
   assert.equal(mirrored.nodeStates['1'].progress, 100)
+  assert.deepEqual(mirrored.nodeExecutionOrder, ['10', '1'])
   assert.deepEqual(mirrored.outputDirectories, ['D:/out'])
   assert.deepEqual(env.mirror.session('a').bindings.inputs.input.files, ['D:/next.wav'])
   await env.channel.transport('main').emitTo('workflow-simple-editor-a', WORKBENCH_STATE, { state: { workflowKey: 'other', jobs: [] } })
@@ -133,6 +135,18 @@ test('a delayed session reply preserves files chosen while the editor is connect
     requestId: 'closed-editor:old-request', state: { workflowKey: 'a', jobs: [], session: { ...env.state.session, bindings: createWorkflowBindings() } },
   })
   assert.deepEqual(env.mirror.session('a').bindings.inputs.input.files, ['D:/new-selection.wav'])
+})
+
+test('removing a run updates an open workflow editor without altering its next-run inputs', async t => {
+  const env = await environment(t)
+  await env.editor.attach('a')
+  await env.editor.request({ action: 'run', workflowKey: 'a', bindings: env.mirror.session('a').bindings })
+  env.state.jobs[0].tasks[0].status = 'failed'
+  env.mirror.session('a').bindings.inputs.input.files = ['D:/next.wav']
+  await env.editor.request({ action: 'remove-run', workflowKey: 'a', jobId: 'job-1' })
+  assert.equal(env.mirror.remoteJobs.a.length, 0)
+  assert.deepEqual(env.mirror.session('a').bindings.inputs.input.files, ['D:/next.wav'])
+  assert.equal(env.performed.at(-1).action, 'remove-run')
 })
 
 test('reopening a simple editor leaves inputs empty without changing an active task snapshot', async t => {
