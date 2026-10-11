@@ -172,40 +172,21 @@ jobs:
           path: artifacts
           merge-multiple: true
           pattern: Pymss-Studio-${{ steps.release_meta.outputs.version }}-macos-*-mlx
-      - name: Split oversized release assets
+      - name: Validate release asset sizes
         shell: bash
         run: |
           set -euo pipefail
-          max_size=$((2040 * 1024 * 1024))
-          has_split=0
+          max_size=$((2 * 1024 * 1024 * 1024))
 
           shopt -s nullglob
           for file in artifacts/*; do
             [ -f "$file" ] || continue
             size=$(stat -c%s "$file")
-            if [ "$size" -gt "$max_size" ]; then
-              echo "Splitting $(basename "$file") (${size} bytes)"
-              sha256sum "$file" > "$file.sha256"
-              split -b "$max_size" -d -a 3 "$file" "$file.part-"
-              rm "$file"
-              has_split=1
+            if [ "$size" -ge "$max_size" ]; then
+              echo "::error::Release asset must be smaller than 2 GiB: $(basename "$file") (${size} bytes)"
+              exit 1
             fi
           done
-
-          if [ "$has_split" = "1" ]; then
-            cat > artifacts/SPLIT-ASSETS-README.txt <<'EOF'
-          Some release assets are split because GitHub Releases require each file to be under 2 GiB.
-
-          Linux/macOS:
-            cat Pymss-Studio-xxx.part-* > Pymss-Studio-xxx
-            sha256sum -c Pymss-Studio-xxx.sha256
-
-          Windows CMD:
-            copy /b Pymss-Studio-xxx.part-000+Pymss-Studio-xxx.part-001 Pymss-Studio-xxx
-
-          Download all parts for the same filename before merging.
-          EOF
-          fi
       - name: Sign managed update assets
         if: needs.windows.result == 'success'
         shell: bash
@@ -292,7 +273,7 @@ jobs:
           copied=0
           for file in artifacts/*; do
             [ -f "$file" ] || continue
-            # Hard-link to preserve complete archives before oversized GitHub assets are split.
+            # Hard-link release assets into the mirror staging directory.
             ln -f "$file" "$staging/"
             copied=$((copied + 1))
           done
