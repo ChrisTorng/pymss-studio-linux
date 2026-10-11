@@ -19,6 +19,7 @@ import {
   isTerminalTaskStatus,
   resolveJobStatus,
   selectQueuedJobGroups,
+  sortJobTasks,
   taskJobId,
   TERMINAL_TASK_STATUSES,
   type TaskStatus,
@@ -75,6 +76,7 @@ export type SeparationTask = {
   jobId?: string
   resultId?: string
   batchId?: string
+  batchIndex?: number
   model: string
   input: string
   jobOutput?: string
@@ -375,6 +377,7 @@ function normalizeTask(task: Partial<SeparationTask>): SeparationTask {
     jobId: typeof task.jobId === 'string' && task.jobId.trim() ? task.jobId : undefined,
     resultId: typeof task.resultId === 'string' && task.resultId.trim() ? task.resultId : undefined,
     batchId: typeof task.batchId === 'string' && task.batchId.trim() ? task.batchId : undefined,
+    ...(typeof task.batchIndex === 'number' && Number.isSafeInteger(task.batchIndex) && task.batchIndex >= 0 ? { batchIndex: task.batchIndex } : {}),
     model: task.model || '',
     input: task.input || '',
     jobOutput: typeof task.jobOutput === 'string' && task.jobOutput.trim() ? normalizeOutputPath(task.jobOutput) : undefined,
@@ -684,7 +687,7 @@ export const useTaskStore = defineStore('task', () => {
       groups.set(id, [...(groups.get(id) || []), task])
     })
     return [...groups.entries()].map(([id, items]) => {
-      const sorted = [...items].sort((a, b) => a.createdAt - b.createdAt)
+      const sorted = sortJobTasks(items)
       const primary = sorted[0]
       const output = primary.jobOutput || primary.output
       const progressTotal = sorted.reduce((sum, item) => {
@@ -1097,7 +1100,7 @@ export const useTaskStore = defineStore('task', () => {
       : joinOutputPath(jobOutput, inputStemSegment(input, resultId, windowsPaths.value), windowsPaths.value)
   }
 
-  function createQueuedTask(input: string, model: string, inferenceParams: Record<string, unknown>, modelType?: string | null, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig) {
+  function createQueuedTask(input: string, model: string, inferenceParams: Record<string, unknown>, modelType?: string | null, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig, batchIndex?: number) {
     const settings = useSettingsStore()
     const id = createRunId('sep')
     const resultId = createRunId('result')
@@ -1106,6 +1109,7 @@ export const useTaskStore = defineStore('task', () => {
       id,
       jobId,
       resultId,
+      ...(typeof batchIndex === 'number' && Number.isSafeInteger(batchIndex) && batchIndex >= 0 ? { batchIndex } : {}),
       model,
       input,
       jobOutput: resolvedJobOutput,
@@ -1128,7 +1132,7 @@ export const useTaskStore = defineStore('task', () => {
     return task
   }
 
-  function createQueuedWorkflowTask(input: string, workflow: WorkflowEntry, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig) {
+  function createQueuedWorkflowTask(input: string, workflow: WorkflowEntry, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig, batchIndex?: number) {
     const settings = useSettingsStore()
     const id = createRunId('wf')
     const resultId = createRunId('result')
@@ -1137,6 +1141,7 @@ export const useTaskStore = defineStore('task', () => {
       id,
       jobId,
       resultId,
+      ...(typeof batchIndex === 'number' && Number.isSafeInteger(batchIndex) && batchIndex >= 0 ? { batchIndex } : {}),
       model: workflow.name,
       input,
       jobOutput: resolvedJobOutput,
@@ -1965,8 +1970,8 @@ export const useTaskStore = defineStore('task', () => {
     return params
   }
 
-  function submitOne(input: string, model: string, inferenceParams: Record<string, unknown>, modelType?: string | null, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig) {
-    return createQueuedTask(input, model, inferenceParams, modelType, jobId, jobOutput, outputLayout, outputNaming)
+  function submitOne(input: string, model: string, inferenceParams: Record<string, unknown>, modelType?: string | null, jobId?: string, jobOutput?: string, outputLayout: OutputLayout = 'folders', outputNaming?: OutputNamingConfig, batchIndex?: number) {
+    return createQueuedTask(input, model, inferenceParams, modelType, jobId, jobOutput, outputLayout, outputNaming, batchIndex)
   }
 
   async function startSeparation(options: { outputDir?: string; outputLayout?: OutputLayout; outputNaming?: OutputNamingConfig } = {}) {
@@ -1989,7 +1994,7 @@ export const useTaskStore = defineStore('task', () => {
     const outputLayout = normalizeOutputLayout(options.outputLayout)
     const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value)
     const outputNaming = normalizeOutputNaming(options.outputNaming)
-    const createdTasks = targets.map(input => submitOne(
+    const createdTasks = targets.map((input, batchIndex) => submitOne(
       input,
       model,
       inferenceParams,
@@ -1998,6 +2003,7 @@ export const useTaskStore = defineStore('task', () => {
       jobOutput,
       outputLayout,
       outputNaming,
+      batchIndex,
     ))
     modelStore.recordModelUse(model)
     scheduleQueue()
@@ -2027,13 +2033,14 @@ export const useTaskStore = defineStore('task', () => {
     const outputLayout = normalizeOutputLayout(options.outputLayout)
     const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value)
     const outputNaming = normalizeOutputNaming(options.outputNaming)
-    const createdTasks = targets.map(input => createQueuedWorkflowTask(
+    const createdTasks = targets.map((input, batchIndex) => createQueuedWorkflowTask(
       input,
       workflow,
       jobId,
       jobOutput,
       outputLayout,
       outputNaming,
+      batchIndex,
     ))
     scheduleQueue()
     return { succeeded: targets.length, failed: 0, total: targets.length, jobId, tasks: createdTasks }
@@ -2047,8 +2054,8 @@ export const useTaskStore = defineStore('task', () => {
     const prepared = prepareWorkbenchRun(workflow.definition, bindings, directory)
     const jobId = createRunId('job')
     const runtimeEntry = { ...workflow, definition: prepared.definition }
-    const createdTasks = prepared.runs.map(run => {
-      const created = createQueuedWorkflowTask(run.input, runtimeEntry, jobId, directory, nativeGraph ? 'flat' : bindings.outputLayout)
+    const createdTasks = prepared.runs.map((run, batchIndex) => {
+      const created = createQueuedWorkflowTask(run.input, runtimeEntry, jobId, directory, nativeGraph ? 'flat' : bindings.outputLayout, undefined, batchIndex)
       const config = tasks.value.find(task => task.id === created.id)!.runConfig!
       config.useTta = false
       if (nativeGraph) config.workflowDefinition = cloneWorkflow(workflow.definition)

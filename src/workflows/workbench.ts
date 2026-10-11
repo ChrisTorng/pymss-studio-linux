@@ -1,6 +1,11 @@
 import { detectWorkflowFormat, isWorkflowSaveNodeType } from './formats.ts'
 
-export type WorkflowNodeState = { status: 'running' | 'done' | 'failed' | 'cancelled'; progress: number; message?: string }
+export type WorkflowNodeState = {
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled' | 'skipped' | 'unknown'
+  progress: number
+  message?: string
+  summary?: { completed: number; total: number; failed: number; cancelled: number; skipped: number; unknown: number }
+}
 export type WorkflowRuntimeBindings = {
   inputs: Record<string, { files: string[]; folder?: string }>
   outputs: Record<string, string>
@@ -132,6 +137,7 @@ export function visibleWorkflowNodeId(runtimeId: string, definition: Record<stri
 }
 
 export const WORKFLOW_NODE_STATUS_KEYS: Record<string, string> = {
+  queued: 'tasks.statusQueued', skipped: 'workbench.notExecuted', unknown: 'workbench.noNodeRecord',
   running: 'workbench.running', done: 'workbench.done', failed: 'workbench.failed', cancelled: 'workbench.cancelled',
 }
 

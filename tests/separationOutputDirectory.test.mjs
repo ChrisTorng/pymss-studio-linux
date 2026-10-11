@@ -39,6 +39,7 @@ const { settings } = await vite.ssrLoadModule('/src/stores/settings.ts')
 const { useTaskStore } = await vite.ssrLoadModule('/src/stores/task.ts')
 const { useModelStore } = await vite.ssrLoadModule('/src/stores/model.ts')
 const { useAppStore } = await vite.ssrLoadModule('/src/stores/app.ts')
+const { selectQueuedJobGroups } = await vite.ssrLoadModule('/src/features/tasks/lifecycle.ts')
 const stores = []
 const waitForSave = () => new Promise(resolve => setTimeout(resolve, 180))
 
@@ -183,6 +184,31 @@ test('clearing the simple workbench directory restores the default for new runs'
     inputs: { input: { files: ['D:/Audio/song.wav'] } }, outputs: {}, primaryInput: 'input', outputLayout: 'flat',
   })
   assert.equal(submitted.tasks[0].jobOutput, settings.outputDir)
+})
+
+test('simple workbench batches retain the selected file order when tasks share a timestamp', async () => {
+  storage()
+  const task = await newStore()
+  const submitted = await task.startWorkbenchInference(workflow, {
+    inputs: { input: { files: ['D:/Audio/first.wav', 'D:/Audio/second.wav', 'D:/Audio/third.wav'] } },
+    outputs: {}, primaryInput: 'input', outputLayout: 'flat',
+  })
+  assert.deepEqual(submitted.tasks.map(item => item.batchIndex), [0, 1, 2])
+  // Tasks are inserted at the front of the store. Equal timestamps must still
+  // produce the source order consumed by the worker's `inputIndex` field.
+  for (const item of task.tasks) item.createdAt = 1
+  const expected = ['D:/Audio/first.wav', 'D:/Audio/second.wav', 'D:/Audio/third.wav']
+  assert.deepEqual(selectQueuedJobGroups(task.tasks, 1)[0].map(item => item.input), expected)
+  for (const jobs of [task.allJobs, task.sessionJobs]) {
+    assert.deepEqual(jobs[0].tasks.map(item => item.input), expected)
+    assert.equal(jobs[0].primary.input, expected[0])
+  }
+  for (const item of task.tasks) {
+    item.status = 'done'
+    item.files = [item.input]
+  }
+  assert.deepEqual(task.resultJobs[0].tasks.map(item => item.input), expected)
+  assert.equal(task.resultJobs[0].primary.input, expected[0])
 })
 
 test('scoped session cleanup retains workflow records and all underlying tasks', async () => {

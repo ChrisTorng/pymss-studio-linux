@@ -523,7 +523,7 @@ onBeforeUnmount(() => {
       <template #execution-progress><WorkflowExecutionProgress :job="workbench.focusedJob.value" :task="workbench.focusedTask.value" /></template>
       <template #run-controls>
         <WorkflowRunPanel :workflow-key="workflowKey" v-model:job-id="selectedJobId" size="small" :run-primary="true"
-          :submitting="submitting" :can-run="canRun"
+          :submitting="submitting" :can-run="canRun" :show-status="false"
           @run="runWorkflow" @cancel="workbench.cancel">
 
         </WorkflowRunPanel>

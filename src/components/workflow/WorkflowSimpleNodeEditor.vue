@@ -1463,16 +1463,16 @@ onBeforeUnmount(() => {
           <path v-if="pendingPath" :d="pendingPath" class="simple-node-editor__edge simple-node-editor__edge--pending" />
         </svg>
 
-        <article class="simple-node simple-node--input" data-simple-node="input" :style="{ ...nodeStyle('input'), width: `${INPUT_WIDTH}px` }" @pointerdown.stop="beginNodeDrag('input', $event)">
+        <article class="simple-node simple-node--input" data-simple-node="input" :data-node-status="nodeStates?.input?.status" :style="{ ...nodeStyle('input'), width: `${INPUT_WIDTH}px` }" @pointerdown.stop="beginNodeDrag('input', $event)">
           <header><span>{{ t('workflows.inputNode') }}</span><strong>{{ t('workflows.originalInput') }}</strong></header>
-          <span v-if="nodeStates?.['input']" class="simple-execution-state" :data-node-status="nodeStates['input'].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates['input'].status]) + ' · ' + Math.round(nodeStates['input'].progress) + '%'" />
+          <span v-if="nodeStates?.['input']" class="simple-execution-state" :data-node-status="nodeStates['input'].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates['input'].status]) + ' · ' + Math.round(nodeStates['input'].progress) + '%'"><template v-if="nodeStates['input'].status === 'running'">{{ t('workbench.running') }}</template></span>
           <button :ref="el => setPortElement('input:output', el)" class="simple-port simple-port--output" :class="{ 'simple-port--source-target': pendingConnection?.direction === 'output' && hoverTarget === 'output:input' }" data-simple-source="input" type="button" @pointerdown.stop="beginConnection('input', $event)" @pointerup.stop="finishOutputConnection('input', $event)"><span>{{ t('workflows.audioOutput') }}</span><i /></button>
           <div v-if="readonly && nodeSummaries?.input" class="simple-execution-summary" :title="nodeSummaries.input">{{ nodeSummaries.input }}</div>
           <slot v-if="!readonly" name="runtime-input" />
-          <WorkflowNodeLog node-id="input" :state="nodeStates?.input" :logs="nodeLogs?.input" :pending="executionVisible" />
+          <WorkflowNodeLog node-id="input" :node-label="t('workflows.originalInput')" :state="nodeStates?.input" :logs="nodeLogs?.input" :pending="executionVisible" />
         </article>
 
-        <article v-for="(step, index) in draft.steps" :key="step.id" class="simple-node simple-node--step" :class="{ 'simple-node--selected': selectedNodeId === step.id }" :style="{ ...nodeStyle(step.id), width: `${NODE_WIDTH}px`, minHeight: `${stepHeight(step)}px` }" :data-simple-node="step.id" @pointerdown.stop="beginNodeDrag(step.id, $event)">
+        <article v-for="(step, index) in draft.steps" :key="step.id" class="simple-node simple-node--step" :class="{ 'simple-node--selected': selectedNodeId === step.id }" :style="{ ...nodeStyle(step.id), width: `${NODE_WIDTH}px`, minHeight: `${stepHeight(step)}px` }" :data-simple-node="step.id" :data-node-status="nodeStates?.[step.id]?.status" @pointerdown.stop="beginNodeDrag(step.id, $event)">
           <header>
             <div><span>{{ t('workflows.separationNode') }} {{ index + 1 }}</span><strong>{{ step.model || t('workflows.stepModelPlaceholder') }}</strong></div>
             <span class="simple-node__header-actions">
@@ -1492,7 +1492,7 @@ onBeforeUnmount(() => {
               <button type="button" class="simple-icon-button" :title="t('workflows.removeStep')" :disabled="draft.steps.length <= 1" @pointerdown.stop @click.stop="removeStep(step)"><n-icon :component="CloseOutline" /></button>
             </span>
           </header>
-          <span v-if="nodeStates?.[step.id]" class="simple-execution-state" :data-node-status="nodeStates[step.id].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates[step.id].status]) + ' · ' + Math.round(nodeStates[step.id].progress) + '%'" />
+          <span v-if="nodeStates?.[step.id]" class="simple-execution-state" :data-node-status="nodeStates[step.id].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates[step.id].status]) + ' · ' + Math.round(nodeStates[step.id].progress) + '%'"><template v-if="nodeStates[step.id].status === 'running'">{{ t('workbench.running') }}</template></span>
           <div class="simple-node__input-wrap" @pointerdown.stop>
             <button :ref="el => setPortElement(`input:${step.id}`, el)" class="simple-port simple-port--input" :class="{ 'simple-port--target': pendingConnection?.direction === 'input' && hoverTarget === `step:${step.id}` }" type="button" :data-simple-target="`step:${step.id}`" @pointerdown.stop="beginInputConnection(step, $event)" @pointerup.stop="finishConnection(`step:${step.id}`, $event)"><i /><span>{{ step.input || t('workflows.stepInputPlaceholder') }}</span></button>
           </div>
@@ -1507,12 +1507,12 @@ onBeforeUnmount(() => {
             </div>
             <span v-if="!step.stems.length" class="simple-node__empty">{{ t('workflows.noStemPorts') }}</span>
           </div>
-          <WorkflowNodeLog :node-id="step.id" :state="nodeStates?.[step.id]" :logs="nodeLogs?.[step.id]" :pending="executionVisible" />
+          <WorkflowNodeLog :node-id="step.id" :node-label="t('workflows.separationNode') + ' ' + (index + 1)" :state="nodeStates?.[step.id]" :logs="nodeLogs?.[step.id]" :pending="executionVisible" />
         </article>
 
-        <article v-for="(ensemble, index) in draft.ensembles" :key="ensemble.id" class="simple-node simple-node--ensemble" :class="{ 'simple-node--selected': selectedNodeId === ensemble.id, 'simple-node--audio-operation': isSimpleAudioOperation(ensemble.algorithm) }" :style="{ ...nodeStyle(ensemble.id), width: `${ENSEMBLE_WIDTH}px`, minHeight: `${ensembleHeight(ensemble)}px` }" :data-simple-node="ensemble.id" :data-audio-operation="isSimpleAudioOperation(ensemble.algorithm) ? ensemble.algorithm : undefined" @pointerdown.stop="beginNodeDrag(ensemble.id, $event)">
+        <article v-for="(ensemble, index) in draft.ensembles" :key="ensemble.id" class="simple-node simple-node--ensemble" :class="{ 'simple-node--selected': selectedNodeId === ensemble.id, 'simple-node--audio-operation': isSimpleAudioOperation(ensemble.algorithm) }" :style="{ ...nodeStyle(ensemble.id), width: `${ENSEMBLE_WIDTH}px`, minHeight: `${ensembleHeight(ensemble)}px` }" :data-simple-node="ensemble.id" :data-node-status="nodeStates?.[ensemble.id]?.status" :data-audio-operation="isSimpleAudioOperation(ensemble.algorithm) ? ensemble.algorithm : undefined" @pointerdown.stop="beginNodeDrag(ensemble.id, $event)">
           <header><div><span>{{ processingNodeLabel(ensemble) }} {{ index + 1 }}</span><strong>{{ ensemble.outputStem || t('workflows.ensembleStemPlaceholder') }}</strong></div><button type="button" class="simple-icon-button" :title="isSimpleAudioOperation(ensemble.algorithm) ? t('workflows.removeAudioOperation') : t('workflows.removeEnsemble')" @pointerdown.stop @click.stop="removeEnsemble(ensemble)"><n-icon :component="CloseOutline" /></button></header>
-          <span v-if="nodeStates?.[ensemble.id]" class="simple-execution-state" :data-node-status="nodeStates[ensemble.id].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates[ensemble.id].status]) + ' · ' + Math.round(nodeStates[ensemble.id].progress) + '%'" />
+          <span v-if="nodeStates?.[ensemble.id]" class="simple-execution-state" :data-node-status="nodeStates[ensemble.id].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates[ensemble.id].status]) + ' · ' + Math.round(nodeStates[ensemble.id].progress) + '%'"><template v-if="nodeStates[ensemble.id].status === 'running'">{{ t('workbench.running') }}</template></span>
           <div class="simple-node__body" @pointerdown.stop>
             <p v-if="isSimpleAudioOperation(ensemble.algorithm)" class="simple-audio-operation-hint">{{ audioOperationCopy[ensemble.algorithm].hint }}</p>
             <label v-else><span>{{ t('workflows.ensembleType') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`ensemble-algorithm:${ensemble.id}`, instance)" :value="ensemble.algorithm" size="small" :options="ensembleAlgorithmOptions" @update:value="updateEnsembleAlgorithm(ensemble, String($event || ''))" /></label>
@@ -1532,12 +1532,12 @@ onBeforeUnmount(() => {
             <n-button size="tiny" :type="ensemble.save ? 'primary' : 'default'" secondary @pointerdown.stop @click.stop="toggleEnsembleSave(ensemble)">{{ ensemble.save ? t('workflows.savedOutput') : t('workflows.saveStems') }}</n-button>
             <button :ref="el => setPortElement(outputPortKey(ensemble.id, ensemble.outputStem.trim()), el)" class="simple-ensemble-output-port" :class="{ 'simple-ensemble-output-port--target': pendingConnection?.direction === 'output' && hoverTarget === `output:${simpleOutputRef(ensemble.id, ensemble.outputStem.trim())}` }" :aria-label="ensemble.outputStem || t('workflows.ensembleOutput')" :data-simple-source="simpleOutputRef(ensemble.id, ensemble.outputStem.trim())" type="button" @pointerdown.stop="beginConnection(simpleOutputRef(ensemble.id, ensemble.outputStem.trim()), $event)" @pointerup.stop="finishOutputConnection(simpleOutputRef(ensemble.id, ensemble.outputStem.trim()), $event)"><i /></button>
           </div>
-          <WorkflowNodeLog :node-id="ensemble.id" :state="nodeStates?.[ensemble.id]" :logs="nodeLogs?.[ensemble.id]" :pending="executionVisible" />
+          <WorkflowNodeLog :node-id="ensemble.id" :node-label="processingNodeLabel(ensemble) + ' ' + (index + 1)" :state="nodeStates?.[ensemble.id]" :logs="nodeLogs?.[ensemble.id]" :pending="executionVisible" />
         </article>
 
-        <article class="simple-node simple-node--save" data-simple-node="save" :style="{ ...nodeStyle('save'), width: `${SAVE_WIDTH}px`, minHeight: `${saveHeight()}px` }" @pointerdown.stop="beginNodeDrag('save', $event)">
+        <article class="simple-node simple-node--save" data-simple-node="save" :data-node-status="nodeStates?.save?.status" :style="{ ...nodeStyle('save'), width: `${SAVE_WIDTH}px`, minHeight: `${saveHeight()}px` }" @pointerdown.stop="beginNodeDrag('save', $event)">
           <header><div><span>{{ t('workflows.saveNode') }}</span><strong>{{ t('workflows.generatedOutputs') }}</strong></div><span class="simple-node__header-actions"><span class="simple-node__count">{{ saveEntries().length }}</span><button v-if="!readonly && runtimeControls" type="button" class="simple-icon-button simple-save-settings" :title="t('separate.output')" :aria-label="t('separate.output')" @pointerdown.stop @click.stop="emit('output-settings')"><n-icon :component="SettingsOutline" /></button></span></header>
-          <span v-if="nodeStates?.['save']" class="simple-execution-state" :data-node-status="nodeStates['save'].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates['save'].status]) + ' · ' + Math.round(nodeStates['save'].progress) + '%'" />
+          <span v-if="nodeStates?.['save']" class="simple-execution-state" :data-node-status="nodeStates['save'].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates['save'].status]) + ' · ' + Math.round(nodeStates['save'].progress) + '%'"><template v-if="nodeStates['save'].status === 'running'">{{ t('workbench.running') }}</template></span>
           <button class="simple-save-drop-target" :class="{ 'simple-save-drop-target--active': pendingConnection && hoverTarget === 'save' }" type="button" data-simple-target="save" @pointerdown.stop @pointerup="finishConnection('save', $event)">{{ t('workflows.dropStemToSave') }}</button>
           <div v-for="(entry, index) in saveEntries()" :key="entry.source" class="simple-save-row">
             <i :ref="el => setPortElement(savePortKey(simpleSourceStepId(entry.source), entry.stem), el)" class="simple-save-row__port" :class="{ 'simple-save-row__port--active': pendingConnection?.direction === 'output' && pendingConnection.target === simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem), 'simple-save-row__port--target': pendingConnection?.direction === 'input' && hoverTarget === simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem) }" :data-simple-target="simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem)" @pointerdown.stop="beginSaveConnection(entry.source, `${entry.sourceLabel} · ${entry.stem}`, $event)" @pointerup.stop="finishConnection(simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem), $event)" />
@@ -1556,7 +1556,7 @@ onBeforeUnmount(() => {
           </div>
           <span v-if="!saveEntries().length" class="simple-node__empty">{{ t('workflows.saveStemsPlaceholder') }}</span>
           <div v-if="readonly && nodeSummaries?.save" class="simple-execution-summary" :title="nodeSummaries.save">{{ nodeSummaries.save }}</div>
-          <WorkflowNodeLog node-id="save" :state="nodeStates?.save" :logs="nodeLogs?.save" :pending="executionVisible" />
+          <WorkflowNodeLog node-id="save" :node-label="t('workflows.saveNode')" :state="nodeStates?.save" :logs="nodeLogs?.save" :pending="executionVisible" />
         </article>
       </div>
     </div>
@@ -1687,6 +1687,31 @@ onBeforeUnmount(() => {
 .simple-execution-state { position: absolute; left: 3px; top: 12px; width: 6px; height: 6px; border-radius: 50%; background: var(--primary); }
 .simple-execution-state[data-node-status="done"] { background: var(--success); }
 .simple-execution-state[data-node-status="failed"] { background: var(--danger); }
+.simple-execution-state[data-node-status="running"] {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  top: -26px;
+  left: 12px;
+  width: auto;
+  height: 23px;
+  padding: 0 9px;
+  border-radius: 6px 6px 0 0;
+  background: var(--primary-strong);
+  color: var(--surface);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.simple-execution-state[data-node-status="running"]::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
 .simple-execution-summary { padding: 6px 12px; font-size: 12px; overflow-wrap: anywhere; max-height: 64px; overflow: auto; color: var(--primary); }
 
 .simple-node-editor {
@@ -1902,6 +1927,14 @@ onBeforeUnmount(() => {
 
 .simple-node--selected {
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 76%, transparent), var(--shadow-soft);
+}
+
+.simple-node[data-node-status="running"] {
+  border-color: var(--primary);
+  box-shadow:
+    0 0 0 3px var(--primary),
+    0 0 0 8px color-mix(in srgb, var(--primary) 14%, transparent),
+    var(--shadow-soft);
 }
 
 .simple-node header {

@@ -16,10 +16,11 @@ import {
 import { useTaskStore, type SeparationJob, type SeparationTask } from '@/stores/task'
 import { useEditorStore, type OrphanedEditorProject } from '@/stores/editor'
 import { usePagedSelection } from '@/composables/usePagedSelection'
+import { resultType, RESULT_TYPE_KEYS, type ResultType } from '@/utils/resultType'
 import { NCheckbox, useDialog, useMessage } from 'naive-ui'
 
 type ResultSort = 'time_desc' | 'time_asc' | 'name_asc' | 'name_desc'
-type ResultGroup = SeparationJob & { items: SeparationTask[] }
+type ResultGroup = SeparationJob & { items: SeparationTask[]; resultType: ResultType }
 
 const { t } = useI18n()
 const task = useTaskStore()
@@ -28,6 +29,12 @@ const message = useMessage()
 const dialog = useDialog()
 
 const search = ref('')
+const typeFilter = ref<ResultType | 'all'>('all')
+const typeOptions = computed(() => [
+  { label: t('results.typeAll'), value: 'all' },
+  ...Object.entries(RESULT_TYPE_KEYS).filter(([value]) => value !== 'unknown' || resultGroups.value.some(group => group.resultType === 'unknown'))
+    .map(([value, key]) => ({ label: t(key), value })),
+])
 const sortBy = ref<ResultSort>('time_desc')
 const expandedIds = ref<string[]>([])
 const orphanedEditorProjects = ref<OrphanedEditorProject[]>([])
@@ -42,11 +49,12 @@ const sortOptions = [
 ]
 
 const resultGroups = computed<ResultGroup[]>(() => {
-  return task.resultJobs.map((job) => ({ ...job, items: job.tasks }))
+  return task.resultJobs.map((job) => ({ ...job, items: job.tasks, resultType: resultType(job.primary) }))
 })
 const filteredResults = computed(() => {
   const keyword = search.value.trim().toLowerCase()
   const list = resultGroups.value.filter((group) => {
+    if (typeFilter.value !== 'all' && group.resultType !== typeFilter.value) return false
     if (!keyword) return true
     const haystack = [
       group.id,
@@ -108,7 +116,7 @@ let resultDragSelection: ResultDragSelection | null = null
 let resultDragTimer: ReturnType<typeof setTimeout> | null = null
 let suppressNextResultClick = false
 
-watch([search, sortBy, pageSize], () => {
+watch([search, sortBy, typeFilter, pageSize], () => {
   page.value = 1
 })
 
@@ -121,7 +129,7 @@ function getFileName(path: string) {
 }
 
 function getGroupTitle(group: ResultGroup) {
-  if (group.inputCount === 1) return getFileName(group.primary.input)
+  if (group.inputCount === 1) return getFileName(group.primary.input) || group.model
   return t('results.groupTitle', { count: group.inputCount, name: getFileName(group.primary.input) })
 }
 
@@ -758,6 +766,7 @@ function formatDurationMs(value: number | undefined) {
         <template #prefix><n-icon :component="SearchOutline" /></template>
       </n-input>
 
+      <n-select v-model:value="typeFilter" class="results-toolbar__type" size="small" :options="typeOptions" :aria-label="t('results.typeFilter')" />
       <n-select
         v-model:value="sortBy"
         class="results-toolbar__sort"
@@ -816,6 +825,7 @@ function formatDurationMs(value: number | undefined) {
           <span class="result-row__body">
             <strong data-result-text>{{ getGroupTitle(item) }}</strong>
             <span class="result-row__meta">
+              <span data-result-text class="result-row__type">{{ t(RESULT_TYPE_KEYS[item.resultType]) }}</span>
               <span data-result-text class="result-row__model" :title="groupTaskIdTitle(item)">{{ item.model }}</span>
               <span data-result-text>{{ item.inputCount }} {{ t('results.inputUnit') }}</span>
               <span data-result-text>{{ item.outputCount }} {{ t('results.stemUnit') }}</span>
@@ -946,7 +956,7 @@ function formatDurationMs(value: number | undefined) {
 
 .results-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 210px auto;
+  grid-template-columns: minmax(0, 1fr) 160px 190px auto;
   align-items: center;
   gap: 10px;
   padding: 10px;
@@ -999,6 +1009,8 @@ function formatDurationMs(value: number | undefined) {
     linear-gradient(180deg, color-mix(in srgb, var(--primary-soft) 10%, transparent), transparent 58%),
     color-mix(in srgb, var(--surface-1) 74%, transparent);
 }
+
+.result-row__type { padding: 1px 6px; border-radius: 5px; background: color-mix(in srgb, var(--primary-soft) 50%, transparent); color: var(--primary-strong); font-size: 10px; white-space: nowrap; }
 
 .result-row--selected:hover {
   border-color: color-mix(in srgb, var(--primary-border) 88%, transparent);

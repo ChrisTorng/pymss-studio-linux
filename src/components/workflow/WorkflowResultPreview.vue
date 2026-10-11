@@ -6,7 +6,10 @@ import { FolderOutline, OpenOutline, PauseOutline, PlayOutline } from '@vicons/i
 import { isTauriRuntime } from '@/utils/appStore'
 import type { StemOutput } from '@/stores/task'
 
-const props = defineProps<{ outputs: StemOutput[]; directories?: string[]; outputDirectory?: string }>()
+const props = defineProps<{
+  outputs?: StemOutput[]; directories?: string[]; outputDirectory?: string
+  groups?: { id: string; label: string; outputs: StemOutput[] }[]
+}>()
 const emit = defineEmits<{ reveal: [path: string] }>()
 const { t } = useI18n()
 // Naive UI applies component attributes to the wrapper; label its focusable handle.
@@ -16,6 +19,8 @@ const vSliderLabel: Directive<HTMLElement, string> = (element, { value }) => {
 type Playback = { currentTime: number; duration: number; loading: boolean; failed: boolean }
 const playback = ref<Record<string, Playback>>({})
 const playingPath = ref('')
+const outputGroups = computed(() => props.groups || [{ id: 'outputs', label: '', outputs: props.outputs || [] }])
+const outputs = computed(() => outputGroups.value.flatMap(group => group.outputs))
 const directories = computed(() => [...new Set((props.directories?.length ? props.directories : [props.outputDirectory || '']).filter(Boolean))])
 let audio: HTMLAudioElement | undefined
 let audioPath = ''
@@ -118,7 +123,7 @@ function seek(path: string, value: number) {
   if (player && player.readyState > 0) player.currentTime = position
 }
 
-watch(() => props.outputs.map(output => output.path).filter(Boolean), paths => {
+watch(() => outputs.value.map(output => output.path).filter(Boolean), paths => {
   const available = new Set(paths)
   if (!available.has(audioPath)) {
     releaseAudio()
@@ -141,8 +146,10 @@ onBeforeUnmount(releaseAudio)
       </div>
     </div>
     <div class="result-preview-heading"><strong>{{ t('separate.previewTitle') }}</strong><span>{{ outputs.length }} {{ t('separate.previewStemUnit') }}</span></div>
-    <div class="result-track-list" role="list">
-      <article v-for="output in outputs" :key="output.path" class="result-track" :class="{ 'result-track--playing': playingPath === output.path, 'result-track--error': state(output.path).failed }" :data-output-path="output.path" role="listitem">
+    <section v-for="group in outputGroups" :key="group.id" class="result-output-group">
+      <h4 v-if="group.label" :title="group.label">{{ group.label }}</h4>
+      <div class="result-track-list" role="list">
+      <article v-for="output in group.outputs" :key="output.path" class="result-track" :class="{ 'result-track--playing': playingPath === output.path, 'result-track--error': state(output.path).failed }" :data-output-path="output.path" role="listitem">
         <div class="result-track__title">
           <strong :title="output.path">{{ fileName(output.path) }}</strong>
           <small class="result-track__stem">{{ output.stem }}</small>
@@ -155,7 +162,8 @@ onBeforeUnmount(releaseAudio)
         <span class="result-track__time">{{ time(state(output.path).currentTime) }} / {{ state(output.path).duration ? time(state(output.path).duration) : '--:--' }}</span>
         <n-button class="result-track__open" circle quaternary size="small" :title="t('common.open') + ' · ' + fileName(output.path)" :aria-label="t('common.open') + ' · ' + fileName(output.path)" @click="emit('reveal', output.path)"><template #icon><n-icon :component="OpenOutline" /></template></n-button>
       </article>
-    </div>
+      </div>
+    </section>
   </section>
   <n-empty v-else :description="t('workbench.noResultsYet')" />
 </template>
@@ -170,6 +178,8 @@ onBeforeUnmount(releaseAudio)
 .result-preview-heading strong { font-size: 14px; font-weight: 600; }
 .result-preview-heading > span { color: var(--on-surface-muted); font-size: 11px; }
 .result-track-list { display: grid; gap: 8px; min-width: 0; }
+.result-output-group { display: grid; gap: 8px; min-width: 0; }
+.result-output-group h4 { margin: 0; color: var(--on-surface-muted); font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-track { display: grid; grid-template-columns: minmax(180px, 1.15fr) 28px minmax(120px, 1fr) 102px 28px; align-items: center; gap: 12px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--outline) 78%, transparent); border-radius: 14px; background: color-mix(in srgb, var(--surface-2) 44%, transparent); transition: border-color 160ms, background-color 160ms; }
 .result-track--playing { border-color: color-mix(in srgb, var(--primary) 40%, var(--outline)); background: color-mix(in srgb, var(--primary-soft) 30%, var(--surface)); }
 .result-track--error { border-color: color-mix(in srgb, var(--danger) 35%, var(--outline)); }

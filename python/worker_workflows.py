@@ -1131,8 +1131,7 @@ def _workflow_separator_factory(**kwargs: Any) -> Any:
     return separator_type.from_model_name(model_name, **kwargs)
 
 
-def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
-               inputs: dict[str, str] | None, output_dir: str, output_layout: str) -> dict[str, Any]:
+def _workflow_graph() -> Any:
     try:
         import pymss.graph as graph
     except (ImportError, ModuleNotFoundError) as exc:
@@ -1141,6 +1140,13 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
         ) from exc
     if getattr(graph, "PROGRESS_EVENT_VERSION", 0) < 1:
         raise RuntimeError("This pymss runtime does not support structured workflow progress. Update the runtime core in Settings and retry.")
+    return graph
+
+
+def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
+               inputs: dict[str, str] | None, output_dir: str, output_layout: str,
+               *, separator_cache: Any = None) -> dict[str, Any]:
+    graph = _workflow_graph()
 
     workbench = payload.get("workbench") is True
     output_targets = _normalize_inputs(payload.get("workbenchOutputs")) if workbench else {}
@@ -1239,6 +1245,8 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
         from worker_workflow_logs import workflow_logging
 
         log_scope = cleanup.enter_context(workflow_logging(task_id))
+        if separator_cache is None:
+            separator_cache = cleanup.enter_context(graph.SeparatorCache(factory=_workflow_separator_factory))
         saved = graph.run_dag(
             dag,
             output_dir=graph_output_dir,
@@ -1254,7 +1262,7 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             audio_params=payload.get("audioParams") if isinstance(payload.get("audioParams"), dict) else None,
             debug=bool(payload.get("debug")),
             strict=True,
-            separator_cache=cleanup.enter_context(graph.SeparatorCache(factory=_workflow_separator_factory)),
+            separator_cache=separator_cache,
         )
         if ensemble_stem is not None:
             return _finalize_ensemble_output(
@@ -1365,7 +1373,19 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
         return emit_error("WORKFLOW_TASK_ID_MISSING", "Workflow task id is required")
 
     failed = False
+    batch_cleanup = ExitStack()
     try:
+        definition = payload.get("workflow")
+        separator_cache = None
+        if isinstance(definition, dict) and "steps" in definition:
+            # Match pymss' workflow batch runner: reuse the bounded native cache
+            # across files, and release it when the batch finishes. Limit the
+            # cache to one separator so different models do not accumulate
+            # in GPU memory. Advanced graphs retain their native per-run scope.
+            graph = _workflow_graph()
+            separator_cache = batch_cleanup.enter_context(graph.SeparatorCache(
+                factory=_workflow_separator_factory, max_entries=1,
+            ))
         for input_index, item in enumerate(raw_tasks, 1):
             if not isinstance(item, dict):
                 continue
@@ -1391,7 +1411,8 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
                                        if payload.get("workbench") is True else {})}, task_id,
                                     input_path=input_path or None,
                                     inputs=item_inputs or None,
-                                    output_dir=output_dir, output_layout=output_layout)
+                                    output_dir=output_dir, output_layout=output_layout,
+                                    **({"separator_cache": separator_cache} if separator_cache is not None else {}))
                 emit("task_stage", {"stage": "writing_output", "message": "Collecting workflow outputs", "progress": 92}, task_id=task_id)
                 emit("task_done", {**result, "outputRoot": output_dir}, task_id=task_id)
             except Exception as exc:
@@ -1406,3 +1427,5 @@ def _cmd_infer_workflow_batch(payload: dict[str, Any], raw_tasks: list[Any]) -> 
             if isinstance(item, dict):
                 emit_error("WORKFLOW_RUN_FAILED", str(exc), detail, task_id=str(item.get("taskId") or ""))
         return 1
+    finally:
+        batch_cleanup.close()

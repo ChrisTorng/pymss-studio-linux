@@ -12,6 +12,7 @@ import { detectWorkflowFormat } from '@/workflows/formats'
 import { initializeWorkbenchBridge, requestWorkbenchAction } from '@/utils/workbenchBridge'
 import { cloneWorkflow, prepareWorkbenchRun, visibleWorkflowNodeStates, workbenchOutputDirectory, workflowBindingsEqual, workflowExecutionSignature, workflowInputNodes, workflowOutputNodes } from '@/workflows/workbench'
 import { visibleWorkflowNodeLogs } from '@/workflows/nodeLogs'
+import { activeWorkflowTask, selectedWorkflowJob, workflowBatchExecution } from '@/workflows/batchExecution'
 
 export function useWorkflowWorkbench(options: {
   workflowKey: ComputedRef<string>
@@ -28,12 +29,10 @@ export function useWorkflowWorkbench(options: {
   const viewMode = computed({ get: () => session.value.viewMode, set: value => { session.value.viewMode = value } })
   const selectedJobId = computed({ get: () => session.value.selectedJobId, set: value => { session.value.selectedJobId = value } })
   const owner = isMainTaskOwner()
-  const jobs = computed(() => owner ? tasks.allJobs : store.remoteJobs[options.workflowKey.value] || [])
-  const focusedJob = computed(() => jobs.value.find(job => job.id === selectedJobId.value) || null)
-  const focusedTask = computed(() => focusedJob.value?.tasks.find(task => task.id === session.value.selectedTaskId)
-    || focusedJob.value?.tasks.find(task => task.status === 'separating')
-    || focusedJob.value?.tasks.find(task => !['done', 'failed', 'cancelled'].includes(task.status))
-    || focusedJob.value?.primary || null)
+  const jobs = computed(() => owner ? tasks.allJobs.filter(job => job.primary.runConfig?.workbench && job.primary.runConfig.workflowId === options.workflowKey.value) : store.remoteJobs[options.workflowKey.value] || [])
+  const focusedJob = computed(() => selectedWorkflowJob(jobs.value, selectedJobId.value))
+  const focusedTask = computed(() => activeWorkflowTask(focusedJob.value?.tasks || []) || focusedJob.value?.tasks.at(-1) || null)
+  const batchExecution = computed(() => workflowBatchExecution(focusedJob.value?.tasks || []))
   const executionDefinition = computed(() => focusedTask.value?.runConfig?.workbench?.sourceDefinition || null)
   const executionMatchesDraft = computed(() => Boolean(executionDefinition.value)
     && workflowExecutionSignature(executionDefinition.value!) === workflowExecutionSignature(options.definition())
@@ -60,10 +59,13 @@ export function useWorkflowWorkbench(options: {
     }),
     ...workflowOutputNodes(options.definition()).map(node => [node.id, workbenchOutputDirectory(node, session.value.bindings.outputs[node.id], settings.outputDir)]),
   ]))
-  const nodeStates = computed(() => executionDefinition.value
-    ? visibleWorkflowNodeStates(executionDefinition.value, focusedTask.value?.nodeStates) : {})
+  const nodeStates = computed(() => running.value
+    ? executionDefinition.value ? visibleWorkflowNodeStates(executionDefinition.value, focusedTask.value?.nodeStates) : {}
+    : batchExecution.value.states)
   const liveNodeStates = computed(() => executionMatchesDraft.value ? nodeStates.value : {})
-  const nodeLogs = computed(() => executionDefinition.value ? visibleWorkflowNodeLogs(executionDefinition.value, focusedTask.value?.nodeLogs) : {})
+  const nodeLogs = computed(() => running.value
+    ? executionDefinition.value ? visibleWorkflowNodeLogs(executionDefinition.value, focusedTask.value?.nodeLogs) : {}
+    : batchExecution.value.logs)
   const liveNodeLogs = computed(() => executionMatchesDraft.value ? nodeLogs.value : {})
   watch(() => [options.workflowKey.value, workflowInputNodes(options.definition()).map(node => node.id).join('\n'),
     workflowOutputNodes(options.definition()).map(node => node.id).join('\n')], () => {

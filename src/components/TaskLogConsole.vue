@@ -14,8 +14,8 @@ function guardLogKeys(event: KeyboardEvent) {
 <template>
   <div v-if="lines.length" class="log-console" :class="{ 'log-console--compact': compact }" role="region" :aria-label="t('tasks.logs')" tabindex="0" @wheel.stop @pointerdown.stop @dblclick.stop @contextmenu.stop @keydown="guardLogKeys">
     <div v-for="(line, index) in lines" :key="index" class="log-line" :class="'log-line--' + levels[index]">
-      <span class="log-line-number">{{ String(index + 1).padStart(3, '0') }}</span>
-      <span class="log-line-level" aria-hidden="true">{{ levels[index].toUpperCase() }}</span>
+      <span v-if="!compact" class="log-line-number">{{ String(index + 1).padStart(3, '0') }}</span>
+      <span v-if="!compact" class="log-line-level" aria-hidden="true">{{ levels[index].toUpperCase() }}</span>
       <span class="log-line-text">{{ line }}</span>
     </div>
   </div>
@@ -24,6 +24,8 @@ function guardLogKeys(event: KeyboardEvent) {
 
 <style scoped>
 .log-console {
+  min-width: 0;
+  user-select: text;
   max-height: min(62vh, 520px);
   overflow: auto;
   display: grid;
@@ -124,7 +126,7 @@ function guardLogKeys(event: KeyboardEvent) {
   text-align: center;
 }
 
-.log-console--compact { max-height: 180px; padding: 6px; border-radius: 6px; font-size: 10px; }
-.log-console--compact .log-line { grid-template-columns: 22px 34px minmax(0, 1fr); gap: 5px; padding: 2px; }
-.log-console--compact .log-line-level { font-size: 8px; line-height: 15px; }
+.log-console--compact { display: block; max-height: 200px; padding: 6px; border-radius: 6px; font-size: 11px; }
+.log-console--compact .log-line { display: block; width: max-content; min-width: 100%; padding: 3px 4px; }
+.log-console--compact .log-line-text { white-space: pre; overflow-wrap: normal; }
 </style>
