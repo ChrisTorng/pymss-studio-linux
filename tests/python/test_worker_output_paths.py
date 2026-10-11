@@ -97,6 +97,7 @@ class WorkerOutputPathTests(unittest.TestCase):
         self.assertTrue(target.is_dir())
 
     def test_workflow_single_and_batch_commands_pass_the_resolved_output_root(self) -> None:
+        expected = (self.default.parent / "delivery").resolve()
         for batch in (False, True):
             with self.subTest(batch=batch):
                 payload = {"taskId": "workflow-path", "output": "delivery", "workflow": {"nodes": []}}
@@ -108,11 +109,11 @@ class WorkerOutputPathTests(unittest.TestCase):
                     self.assertEqual(worker_workflows.cmd_infer_workflow(payload), 0)
                 self.assertEqual(run.call_count, 2 if batch else 1)
                 for call in run.call_args_list:
-                    self.assertEqual(Path(call.kwargs["output_dir"]), self.default.parent / "delivery")
+                    self.assertEqual(Path(call.kwargs["output_dir"]), expected)
                 completed = [call for call in emit.call_args_list if call.args[0] == "task_done"]
                 self.assertEqual(len(completed), 2 if batch else 1)
                 for call in completed:
-                    self.assertEqual(Path(call.args[1]["outputRoot"]), self.default.parent / "delivery")
+                    self.assertEqual(Path(call.args[1]["outputRoot"]), expected)
 
     def test_native_output_path_reaches_the_path_parser_without_trimming(self) -> None:
         native_path = str(self.root / "physical-root ")

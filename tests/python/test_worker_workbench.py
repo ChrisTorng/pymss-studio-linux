@@ -42,13 +42,13 @@ class WorkbenchNativeTests(unittest.TestCase):
         destinations = {'3': str(self.root / 'a'), '4': str(self.root / 'b')}
         result = self.run_graph(definition, destinations)
         self.assertEqual([item['nodeId'] for item in result['outputs']], ['3', '4'])
-        self.assertEqual(set(result['outputDirectories']), set(destinations.values()))
+        self.assertEqual(set(result['outputDirectories']), {str(Path(path).resolve()) for path in destinations.values()})
         self.assertIn(result['outputDir'], result['outputDirectories'])
         for item, expected in zip(result['outputs'], (0.6, 0.2)):
             audio, rate = self.load_audio(item['path'], sr=None, mono=False)
             self.np.testing.assert_allclose(audio, expected, atol=1e-6)
             self.assertEqual(rate, 44100)
-            self.assertEqual(Path(item['path']).parent, Path(destinations[item['nodeId']]))
+            self.assertEqual(Path(item['path']).parent, Path(destinations[item['nodeId']]).resolve())
         again = self.run_graph(definition, destinations)
         self.assertNotEqual(result['files'], again['files'])
         self.assertTrue(all(Path(path).is_file() for path in result['files'] + again['files']))
@@ -59,7 +59,7 @@ class WorkbenchNativeTests(unittest.TestCase):
             'inputs': [{'source': 'input', 'weight': 1}],
         }]}
         result = self.run_graph(definition, {'studio:ensemble-save:phase': str(self.root / 'phase')})
-        self.assertEqual(Path(result['files'][0]).parent, self.root / 'phase')
+        self.assertEqual(Path(result['files'][0]).parent, (self.root / 'phase').resolve())
         audio, _ = self.load_audio(result['files'][0], sr=None, mono=False)
         self.np.testing.assert_allclose(audio, -0.6, atol=1e-6)
 
@@ -84,9 +84,10 @@ class WorkbenchNativeTests(unittest.TestCase):
         result = self.run_graph(definition, {'3': directory, '4': directory})
         self.assertEqual(len(set(result['files'])), 2)
         self.assertEqual({Path(path).name for path in result['files']}, {'name.flac', 'name_2.flac'})
-        self.assertTrue(all(Path(path).parent == Path(directory) / 'shared' for path in result['files']))
-        self.assertEqual(result['outputDirectories'], [str(Path(directory) / 'shared')])
-        self.assertEqual(result['outputDir'], str(Path(directory) / 'shared'))
+        expected_directory = (Path(directory) / 'shared').resolve()
+        self.assertTrue(all(Path(path).parent == expected_directory for path in result['files']))
+        self.assertEqual(result['outputDirectories'], [str(expected_directory)])
+        self.assertEqual(result['outputDir'], str(expected_directory))
         for item, expected in zip(result['outputs'], (0.6, 0.2)):
             audio, _ = self.load_audio(item['path'], sr=None, mono=False)
             self.np.testing.assert_allclose(audio, expected, atol=1e-6)

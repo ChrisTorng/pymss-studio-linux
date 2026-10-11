@@ -116,7 +116,7 @@ class NativeWorkflowBatchTests(unittest.TestCase):
             outputs = done[f"simple-batch-{index}"]["outputs"]
             self.assertEqual(len(outputs), 1)
             self.assertEqual(outputs[0]["nodeId"], "save:step1:Vocals")
-            self.assertEqual(Path(outputs[0]["path"]).parent, self.root / f"out-{index}")
+            self.assertEqual(Path(outputs[0]["path"]).parent, (self.root / f"out-{index}").resolve())
             audio, _rate = self.load_audio(outputs[0]["path"], sr=None, mono=False)
             self.np.testing.assert_allclose(audio, amplitude, atol=1e-6)
         progress = [call for call in self.events.call_args_list
