@@ -33,10 +33,20 @@ class ModelDownloadError(RuntimeError):
 
 
 class JsonLogHandler:
-    def __init__(self, task_id: str):
+    def __init__(self, task_id: str, node_id_provider: Any = None, level_provider: Any = None):
         import logging
         self.task_id = task_id
         self.level = logging.INFO
+        self.node_id_provider = node_id_provider
+        self.level_provider = level_provider
+
+    @property
+    def level(self) -> int:
+        return self.level_provider() if self.level_provider is not None else self._level
+
+    @level.setter
+    def level(self, value: int) -> None:
+        self._level = value
 
     def setLevel(self, level: int) -> None:
         self.level = level
@@ -45,6 +55,9 @@ class JsonLogHandler:
         if record.levelno < self.level:
             return False
         payload = {"level": record.levelname.lower(), "message": record.getMessage()}
+        node_id = self.node_id_provider() if self.node_id_provider else None
+        if node_id is not None:
+            payload["nodeId"] = str(node_id)
         if record.exc_info:
             import logging
             payload["detail"] = logging.Formatter().formatException(record.exc_info)

@@ -8,8 +8,10 @@ import { useTaskStore } from '@/stores/task'
 import { useSettingsStore } from '@/stores/settings'
 import type { WorkflowEntry } from '@/stores/workflow'
 import { isMainTaskOwner } from '@/utils/taskOwner'
+import { detectWorkflowFormat } from '@/workflows/formats'
 import { initializeWorkbenchBridge, requestWorkbenchAction } from '@/utils/workbenchBridge'
-import { cloneWorkflow, prepareWorkbenchRun, visibleWorkflowNodeId, workbenchOutputDirectory, workflowInputNodes, workflowOutputNodes, type WorkflowNodeState } from '@/workflows/workbench'
+import { cloneWorkflow, prepareWorkbenchRun, visibleWorkflowNodeStates, workbenchOutputDirectory, workflowBindingsEqual, workflowExecutionSignature, workflowInputNodes, workflowOutputNodes } from '@/workflows/workbench'
+import { visibleWorkflowNodeLogs } from '@/workflows/nodeLogs'
 
 export function useWorkflowWorkbench(options: {
   workflowKey: ComputedRef<string>
@@ -33,6 +35,10 @@ export function useWorkflowWorkbench(options: {
     || focusedJob.value?.tasks.find(task => !['done', 'failed', 'cancelled'].includes(task.status))
     || focusedJob.value?.primary || null)
   const executionDefinition = computed(() => focusedTask.value?.runConfig?.workbench?.sourceDefinition || null)
+  const executionMatchesDraft = computed(() => Boolean(executionDefinition.value)
+    && workflowExecutionSignature(executionDefinition.value!) === workflowExecutionSignature(options.definition())
+    && (focusedTask.value!.runConfig!.workbench!.nativeGraph
+      || workflowBindingsEqual(session.value.bindings, focusedTask.value!.runConfig!.workbench!.bindings)))
   const executionNodeSummaries = computed(() => {
     const target = focusedTask.value
     const snapshot = target?.runConfig?.workbench
@@ -54,24 +60,11 @@ export function useWorkflowWorkbench(options: {
     }),
     ...workflowOutputNodes(options.definition()).map(node => [node.id, workbenchOutputDirectory(node, session.value.bindings.outputs[node.id], settings.outputDir)]),
   ]))
-  const nodeStates = computed(() => {
-    const result: Record<string, WorkflowNodeState> = {}
-    const definition = executionDefinition.value
-    if (!definition) return result
-    for (const [runtimeId, state] of Object.entries(focusedTask.value?.nodeStates || {})) {
-      const visible = visibleWorkflowNodeId(runtimeId, definition)
-      if (!visible) continue
-      if (visible === 'save') {
-        const previous = result[visible]
-        result[visible] = previous && previous.status !== 'done' ? previous : state
-      } else {
-        // Intermediate merge completion is not completion of the visible sum node.
-        result[visible] = runtimeId.includes(':mix:') && state.status === 'done'
-          ? { status: 'running', progress: state.progress } : state
-      }
-    }
-    return result
-  })
+  const nodeStates = computed(() => executionDefinition.value
+    ? visibleWorkflowNodeStates(executionDefinition.value, focusedTask.value?.nodeStates) : {})
+  const liveNodeStates = computed(() => executionMatchesDraft.value ? nodeStates.value : {})
+  const nodeLogs = computed(() => executionDefinition.value ? visibleWorkflowNodeLogs(executionDefinition.value, focusedTask.value?.nodeLogs) : {})
+  const liveNodeLogs = computed(() => executionMatchesDraft.value ? nodeLogs.value : {})
   watch(() => [options.workflowKey.value, workflowInputNodes(options.definition()).map(node => node.id).join('\n'),
     workflowOutputNodes(options.definition()).map(node => node.id).join('\n')], () => {
     const inputs = new Set(workflowInputNodes(options.definition()).map(node => node.id))
@@ -100,7 +93,12 @@ export function useWorkflowWorkbench(options: {
               await connected.remember(previous, cloneWorkflow(store.session(previous)))
             }
             await connected.attach(key)
-            if (!disposed && options.workflowKey.value === key) remoteReady = true
+            if (!disposed && options.workflowKey.value === key) {
+              remoteReady = true
+              if (detectWorkflowFormat(options.definition()) === 'simple') {
+                await connected.remember(key, cloneWorkflow(store.session(key)))
+              }
+            }
           } catch (error) { if (!disposed) message.error(String(error)) }
         }, { immediate: true }))
         stopRemoteWatches.push(watch(() => session.value, value => {
@@ -108,9 +106,10 @@ export function useWorkflowWorkbench(options: {
         }, { deep: true }))
       } catch (error) { message.error(String(error)) }
     }
+    if (detectWorkflowFormat(options.definition()) !== 'simple') return
     try {
       const remove = await getCurrentWebview().onDragDropEvent(async event => {
-        if (event.payload.type !== 'drop' || viewMode.value !== 'edit') return
+        if (event.payload.type !== 'drop') return
         const nodes = workflowInputNodes(options.definition())
         const position = event.payload.position
         const target = document.elementFromPoint(position.x / window.devicePixelRatio, position.y / window.devicePixelRatio)?.closest<HTMLElement>('[data-workbench-input]')
@@ -155,7 +154,7 @@ export function useWorkflowWorkbench(options: {
       const target = store.session(entry.id)
       target.selectedJobId = result.jobId || ''
       target.selectedTaskId = ''
-      target.viewMode = 'execution'
+      target.viewMode = 'edit'
       message.success(t('workbench.submitted', { count: result.total }))
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error)
@@ -169,5 +168,5 @@ export function useWorkflowWorkbench(options: {
       else await requestWorkbenchAction({ action: 'cancel', workflowKey: options.workflowKey.value, jobId: focusedJob.value.id })
     } catch (error) { message.error(String(error)) }
   }
-  return { session, viewMode, selectedJobId, focusedJob, focusedTask, executionDefinition, executionNodeSummaries, nodeStates, nodeSummaries, running, submitting, run, cancel, adoptWorkflowKey }
+  return { session, viewMode, selectedJobId, focusedJob, focusedTask, executionDefinition, executionNodeSummaries, nodeStates, liveNodeStates, nodeLogs, liveNodeLogs, executionMatchesDraft, nodeSummaries, running, submitting, run, cancel, adoptWorkflowKey }
 }

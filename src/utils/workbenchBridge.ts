@@ -16,8 +16,9 @@ export function initializeWorkbenchBridge() {
   const workbench = useWorkbenchStore()
   const tasks = useTaskStore()
   const workflows = useWorkflowStore()
+  const label = getCurrentWindow().label
   bridge = createWorkbenchBridge({
-    label: getCurrentWindow().label,
+    label,
     transport: { listen: (name, handler) => listen(name, event => handler(event.payload)), emitTo },
     ...(isMainTaskOwner() ? { host: {
       snapshot: (key: string, includeSession: boolean) => cloneWorkflow({
@@ -39,7 +40,7 @@ export function initializeWorkbenchBridge() {
           session.bindings = cloneWorkflow(action.bindings)
           session.selectedJobId = result.jobId
           session.selectedTaskId = ''
-          session.viewMode = 'execution'
+          session.viewMode = 'edit'
           return { jobId: result.jobId, total: result.total }
         }
         const target = tasks.tasks.find(task => task.runConfig?.workbench && task.runConfig.workflowId === action.workflowKey
@@ -50,7 +51,7 @@ export function initializeWorkbenchBridge() {
         return { taskId: retry?.id, jobId: retry?.jobId || retry?.id }
       },
       watchTasks: (notify: () => void) => watch(() => tasks.tasks, notify, { deep: true }),
-    } } : { applyState: workbench.applyRemoteState, bindingFingerprint: (key: string) => JSON.stringify(workbench.session(key).bindings) }),
+    } } : { applyState: state => workbench.applyRemoteState(state, label.startsWith('workflow-simple-editor-')), bindingFingerprint: (key: string) => JSON.stringify(workbench.session(key).bindings) }),
   }).catch(error => { bridge = undefined; throw error })
   return bridge
 }

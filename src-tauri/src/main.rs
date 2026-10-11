@@ -10,6 +10,7 @@ mod state;
 mod storage;
 mod terminal;
 mod update_manager;
+mod workflow_editors;
 
 use state::AppState;
 use tauri::{Emitter, Manager};
@@ -51,6 +52,7 @@ fn main() {
                 && (window.label().starts_with("workflow-node-editor")
                     || window.label().starts_with("workflow-simple-editor"))
             {
+                workflow_editors::release_window(window.app_handle(), window.label());
                 let event = if window.label().starts_with("workflow-simple-editor") {
                     "pymss://workflow-simple-editor-closed"
                 } else {
@@ -63,7 +65,8 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_store::Builder::new().build())
-        .manage(AppState::new());
+        .manage(AppState::new())
+        .manage(workflow_editors::WorkflowEditors::default());
 
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
@@ -134,6 +137,7 @@ fn main() {
             commands::app_cmd::pick_model_weights_file,
             commands::app_cmd::pick_model_config_file,
             commands::app_cmd::load_app_store,
+            commands::app_cmd::get_workflow_editors,
             commands::app_cmd::mutate_workflow_store,
             commands::app_cmd::load_editor_project,
             commands::app_cmd::relink_editor_sources,

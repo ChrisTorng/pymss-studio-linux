@@ -120,6 +120,7 @@ function environment() {
   const exports = []
   const editorOpens = []
   let editorOpenError
+  let nativeEditorSnapshot = null
   const callbacks = new Map()
   const listeners = new Map()
   let callbackId = 0
@@ -129,6 +130,7 @@ function environment() {
       metadata: { currentWindow: { label: 'main' } },
       transformCallback(handler) { callbacks.set(++callbackId, handler); return callbackId },
       async invoke(command, args) {
+        if (command === 'get_workflow_editors') return structuredClone(nativeEditorSnapshot)
         if (command === 'load_app_store') {
           assert.equal(args.name, 'workflow-state')
           reads.push(args.name)
@@ -136,6 +138,10 @@ function environment() {
         }
         if (command === 'mutate_workflow_store') {
           const mutation = args.payload
+          const target = mutation.entry?.id || mutation.workflowId
+          if (['upsert', 'delete'].includes(mutation.action) && nativeEditorSnapshot?.editors.some(editor => editor.workflowId === target && editor.label !== 'main')) {
+            throw new Error('WORKFLOW_EDITOR_IN_USE')
+          }
           if (mutateHook) await mutateHook(mutation)
           const state = structuredClone(stored)
           state.workflows ||= []
@@ -261,6 +267,7 @@ function environment() {
   return {
     store, reads, writes, listeners, exports, editorOpens,
     set editorOpenFailure(value) { editorOpenError = value },
+    set nativeEditorSnapshot(value) { nativeEditorSnapshot = structuredClone(value) },
     get stored() { return stored },
     set stored(value) { stored = structuredClone(value) },
     set read(value) { readHook = value },
@@ -1058,4 +1065,54 @@ test('new workflows use blank native windows and a failed open leaves the overvi
   assert.equal(env.store.nodeEditorOpenWorkflowId, '')
   assert.deepEqual(navigation, [])
   assert.equal(messages.at(-1).text, 'Window creation failed')
+})
+
+test('native ownership adopts formal ids and ignores older snapshots or stale open responses', () => {
+  const env = environment()
+  env.store.applyEditorSnapshot({ revision: 1, editors: [{ label: 'workflow-simple-editor-new', workflowId: '', kind: 'simple' }] })
+  env.store.applyEditorSnapshot({ revision: 2, editors: [{ label: 'workflow-simple-editor-new', workflowId: 'original', kind: 'simple' }] })
+  env.store.recordEditorOpened({ editorSnapshot: { revision: 1, editors: [] } }, 'simple', '__new__')
+  assert.equal(env.store.editorFor('original').label, 'workflow-simple-editor-new')
+  assert.equal(env.store.simpleEditorOpenWorkflowId, 'original')
+  assert.equal(env.store.hasAnyEditorOpen, true)
+})
+
+test('closing one native editor leaves another document locked, including delayed close notifications', async () => {
+  const env = environment()
+  const remaining = { label: 'workflow-simple-editor-b', workflowId: 'other', kind: 'simple' }
+  env.store.applyEditorSnapshot({ revision: 2, editors: [{ label: 'workflow-simple-editor-a', workflowId: 'original', kind: 'simple' }, remaining] })
+  env.nativeEditorSnapshot = { revision: 3, editors: [remaining] }
+  await env.store.handleEditorClosed('simple', 'workflow-simple-editor-a')
+  assert.equal(env.store.editorFor('original'), undefined)
+  assert.equal(env.store.editorFor('other').label, remaining.label)
+  await env.store.handleEditorClosed('simple', 'workflow-simple-editor-a')
+  assert.equal(env.store.editorFor('other').label, remaining.label)
+  assert.equal(env.store.hasAnyEditorOpen, true)
+})
+
+test('management saves and force overwrites cannot bypass an active native workflow owner', async () => {
+  const env = environment()
+  await env.store.initialize()
+  env.nativeEditorSnapshot = { revision: 1, editors: [{ label: 'workflow-simple-editor-new', workflowId: 'original', kind: 'simple' }] }
+  const page = env.mount(WorkflowsView)
+  await env.store.refreshEditorWindows()
+  page.state.name = 'Management edit'
+  await page.state.saveMeta()
+  assert.deepEqual(env.writes, [])
+  const input = { id: 'original', name: 'Forced edit', definition: env.store.selectedWorkflow.definition, force: true }
+  await assert.rejects(env.store.saveWorkflow(input), error => error.code === 'WORKFLOW_EDITOR_IN_USE')
+  assert.deepEqual(env.writes, [])
+})
+
+test('main app consumes ownership snapshots before reacting to legacy editor-close events', async () => {
+  const env = environment()
+  await env.store.initialize()
+  env.mount(App)
+  await flush()
+  const owner = { label: 'workflow-simple-editor-new', workflowId: 'original', kind: 'simple' }
+  env.dispatch('pymss://workflow-editors-changed', { revision: 8, editors: [owner] })
+  env.nativeEditorSnapshot = { revision: 8, editors: [owner] }
+  env.dispatch(closeEvent('simple'), { label: 'closed-older-window' })
+  await flush()
+  assert.equal(env.store.editorFor('original').label, owner.label)
 })

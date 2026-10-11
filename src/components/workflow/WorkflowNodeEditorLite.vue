@@ -8,6 +8,8 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useMessage } from 'naive-ui'
+import { invoke } from '@tauri-apps/api/core'
 import { LGraph, LGraphCanvas, LiteGraph, createBounds, type LGraphNode } from '@comfyorg/litegraph'
 import '@comfyorg/litegraph/style.css'
 import {
@@ -35,8 +37,10 @@ import { parseModelStems } from '@/utils/workflowSimple'
 import type { ModelEntry } from '@/stores/model'
 import type { NodeSpec } from '@/litegraph/nodeSpecs'
 import { translateNodeCategory, translateNodeTitle, type NodeTranslator } from '@/litegraph/nodeLocalization'
-import { WORKFLOW_NODE_STATUS_KEYS, type WorkflowNodeState } from '@/workflows/workbench'
-import { isGraphWorkflowDefinition, isWorkflowSaveNodeType } from '@/workflows/formats'
+import { type WorkflowNodeState } from '@/workflows/workbench'
+import WorkflowNodeLog from '@/components/workflow/WorkflowNodeLog.vue'
+import type { WorkflowNodeLogs } from '@/workflows/nodeLogs'
+import { isGraphWorkflowDefinition } from '@/workflows/formats'
 import { applyGraphDefaultWidgets, type GraphDefaults } from '@/workflows/graphDefaults'
 
 // All node specs the palette offers (pymss nodes + ComfyUI builtin audio/string nodes).
@@ -44,9 +48,9 @@ const ALL_SPECS: Record<string, NodeSpec> = { ...NODE_SPECS, ...BUILTIN_SPECS }
 
 const props = withDefaults(defineProps<{
   readonly?: boolean
-  runtimeControls?: boolean
   nodeStates?: Record<string, WorkflowNodeState>
-  nodeSummaries?: Record<string, string>
+  nodeLogs?: WorkflowNodeLogs
+  executionVisible?: boolean
   modelOptions: { label: string; value: string }[]
   models: ModelEntry[]
   defaultDevice?: string
@@ -62,7 +66,6 @@ const props = withDefaults(defineProps<{
 const definition = defineModel<Record<string, unknown>>('definition', { required: true })
 const emit = defineEmits<{
   run: []
-  'runtime-node': [binding: { id: string; action: string }]
   save: [definition: Record<string, unknown>]
   close: []
   initialized: []
@@ -71,6 +74,7 @@ const emit = defineEmits<{
 defineExpose({ snapshotDefinition })
 
 const { t, locale } = useI18n()
+const message = useMessage()
 const nodeTranslator = t as unknown as NodeTranslator
 const canvasEl = ref<HTMLCanvasElement | null>(null)
 const graphRef = shallowRef<LGraph | null>(null)
@@ -78,6 +82,19 @@ const canvasRef = shallowRef<LGraphCanvas | null>(null)
 const showPalette = ref(false)
 const paletteQuery = ref('')
 const ready = ref(false)
+const nodeLogPositions = ref<Record<string, { left: number; top: number; width: number; scale: number }>>({})
+function updateNodeLogPositions() {
+  const canvas = canvasRef.value
+  const nodes = graphRef.value?.nodes || []
+  if (!canvas) return
+  const next = Object.fromEntries(nodes.filter(node => !node.flags?.collapsed && (props.executionVisible || props.nodeStates?.[String(node.id)] || props.nodeLogs?.[String(node.id)]?.length))
+    .map(node => [String(node.id), {
+      left: (node.pos[0] + canvas.ds.offset[0]) * canvas.ds.scale,
+      top: (node.pos[1] + node.size[1] + canvas.ds.offset[1]) * canvas.ds.scale,
+      width: node.size[0], scale: canvas.ds.scale,
+    }]))
+  if (JSON.stringify(next) !== JSON.stringify(nodeLogPositions.value)) nodeLogPositions.value = next
+}
 let configuringGraph = false
 let graphInitialized = false
 let awaitingInitialDefinition = false
@@ -158,6 +175,7 @@ function redo() {
 function guardReadonlyKeyboard(event: KeyboardEvent) {
   if (!props.readonly) return
   if (canvasRef.value) canvasRef.value.read_only = true
+  if (event.key === 'Escape' || event.key === 'Tab') return
   event.preventDefault()
   event.stopImmediatePropagation()
 }
@@ -401,6 +419,7 @@ onMounted(() => {
   applyPymssPortColors(canvas)
   graphRef.value = graph
   canvasRef.value = canvas
+  canvas.onDrawForeground = updateNodeLogPositions
   // Hide the default search-on-double-click; we use our own palette.
   // 保留 litegraph 默认交互: 双击空白/拖线释放弹节点搜索框,右键弹菜单。
   // 样式由 @comfyorg/litegraph/style.css 提供(在组件 <style> 外全局引入)。
@@ -447,7 +466,7 @@ function seedStarterGraph() {
   const load = LiteGraph.createNode('pymss_load_audio'); if (!load) return
   load.pos = [80, 200]; graph.add(load)
   const params = LiteGraph.createNode('pymss_mss_params'); if (!params) return
-  params.pos = [80, Math.max(400, load.pos[1] + load.size[1] + 120)]; graph.add(params)
+  params.pos = [80, 400]; graph.add(params)
   const sep = LiteGraph.createNode('mss_separate'); if (!sep) return
   sep.pos = [460, 280]; graph.add(sep)
   const save = LiteGraph.createNode('pymss_save_audio'); if (!save) return
@@ -513,6 +532,7 @@ function scheduleSnap() {
   })
 }
 watch(() => props.nodeStates, () => { canvasRef.value?.setDirty(true, true) }, { deep: true })
+watch(() => [props.nodeLogs, props.executionVisible], () => { updateNodeLogPositions(); canvasRef.value?.setDirty(true, true) }, { deep: true })
 watch(ready, (v) => {
   if (!v || !graphRef.value) return
   ;(graphRef.value as any).onAfterChange = scheduleSnap
@@ -537,23 +557,16 @@ function configureGraphNode(node: LGraphNode) {
     runtimeNodes.add(node)
     const originalDraw = node.onDrawForeground
     node.onDrawForeground = function(ctx, ...args) {
-      const summary = node.widgets?.find(widget => widget.name === '__workbench_summary')
-      if (summary) summary.label = (props.nodeSummaries?.[String(node.id)] || t('workbench.viewNode')).slice(0, 54)
-      originalDraw?.call(this, ctx, ...args)
-      if (props.readonly && props.nodeSummaries?.[String(node.id)]) {
-        ctx.save()
-        ctx.font = '11px sans-serif'
-        ctx.fillStyle = '#d0d5dc'
-        ctx.fillText(props.nodeSummaries[String(node.id)].slice(0, Math.floor((node.size[0] - 16) / 7)), 8, node.size[1] - 34)
-        ctx.restore()
+      const picker = node.widgets?.find(widget => (widget as any).__nativePathPicker)
+      if (picker) {
+        picker.label = t(node.type === 'pymss_load_audio_batch' ? 'workbench.chooseFolder' : 'workflows.advancedEditor.chooseAudioFile')
       }
+      originalDraw?.call(this, ctx, ...args)
       const state = props.nodeStates?.[String(node.id)]
       if (state) {
         ctx.save()
         ctx.fillStyle = state.status === 'done' ? '#65bd8c' : state.status === 'failed' ? '#e0757e' : '#d995bb'
-        ctx.fillRect(0, node.size[1] - 4, node.size[0] * state.progress / 100, 4)
-        ctx.font = '11px sans-serif'
-        ctx.fillText(`${t(WORKFLOW_NODE_STATUS_KEYS[state.status])} ${Math.round(state.progress)}%`, 8, node.size[1] - 12)
+        ctx.fillRect(0, node.size[1] - 2, node.size[0] * state.progress / 100, 2)
         ctx.restore()
       }
     }
@@ -567,24 +580,33 @@ function configureGraphNode(node: LGraphNode) {
   syncSeparateNodeStems(node)
   refreshNodeModelOptions(node, modelValues.value)
   localizePymssNode(node, nodeTranslator)
-  if (props.runtimeControls && (['input_audio', 'pymss_load_audio', 'pymss_load_audio_batch', 'LoadAudio'].includes(String(node.type)) || isWorkflowSaveNodeType(node.type))) {
-      for (const widget of node.widgets || []) {
-        if (['audio', 'folder', 'input_name', 'output_folder', 'recursive', 'sort_files'].includes(widget.name)) {
-          widget.hidden = true
-          widget.computeLayoutSize = () => ({ minHeight: 0, maxHeight: 0, minWidth: 0 })
-        }
-      }
-    }
-  if (!props.readonly && !node.widgets?.some(widget => widget.serialize === false) && (['input_audio', 'pymss_load_audio', 'pymss_load_audio_batch', 'LoadAudio'].includes(String(node.type)) || isWorkflowSaveNodeType(node.type))) {
-    const output = isWorkflowSaveNodeType(node.type)
-
-    const actions = output ? [['workbench.chooseOutput', 'output']] : [['workbench.addFiles', 'files'], ['workbench.chooseFolder', 'folder']]
-    for (const [key, action] of actions) {
-      const picker = node.addWidget('button', t(key), '', () => emit('runtime-node', { id: String(node.id), action }))
-      picker.serialize = false
-    }
-    const summary = node.addWidget('button', '__workbench_summary', '', () => emit('runtime-node', { id: String(node.id), action: 'inspect' }))
-    summary.serialize = false
+  if (!props.readonly && !node.widgets?.some(widget => (widget as any).__nativePathPicker)
+    && ['pymss_load_audio', 'pymss_load_audio_batch', 'LoadAudio'].includes(String(node.type))) {
+    const batch = node.type === 'pymss_load_audio_batch'
+    const pathWidget = node.widgets?.find(widget => ['audio', 'audio_path', 'filename', 'folder'].includes(widget.name))
+    if (!pathWidget) return
+    let picking = false
+    const picker = node.addCustomWidget({
+      type: 'button', name: 'studio_choose_path', value: '', options: {}, y: 0, serialize: false,
+      callback: async () => {
+        if (picking) return
+        picking = true
+        try {
+          const path = await invoke<string | null>(batch ? 'pick_input_folder' : 'pick_single_audio_file')
+          const graph = graphRef.value
+          if (!path || !graph || graph.getNodeById(node.id) !== node) return
+          graph.beforeChange()
+          pathWidget.value = path
+          const inputName = node.widgets?.find(widget => widget.name === 'input_name')
+          if (inputName) inputName.value = ''
+          graph.afterChange()
+          scheduleSnap()
+          canvasRef.value?.setDirty(true, true)
+        } catch (error) { message.error(String(error)) }
+        finally { picking = false }
+      },
+    })
+    ;(picker as any).__nativePathPicker = true
     node.setSize([node.size[0], Math.max(node.size[1], node.computeSize()[1])])
   }
 }
@@ -597,8 +619,8 @@ function configureGraphNode(node: LGraphNode) {
       <n-button size="small" :disabled="!canUndo" @click="undo">{{ t('common.undo') || 'Undo' }}</n-button>
       <n-button size="small" :disabled="!canRedo" @click="redo">{{ t('common.redo') || 'Redo' }}</n-button>
       <n-button size="small" @click="onSave" :disabled="!props.canSave" type="primary">{{ t('common.save') }}</n-button>
-      <n-button v-if="!runtimeControls" size="small" @click="emit('run')">{{ t('workbench.saveAndRun') }}</n-button>
-      <n-button v-if="!runtimeControls" size="small" @click="onClose">{{ t('common.close') }}</n-button>
+      <slot name="run-controls" />
+      <n-button size="small" @click="onClose">{{ t('common.close') }}</n-button>
       <span v-if="props.formError" class="err">{{ props.formError }}</span>
       <span v-if="props.advisory" class="warn">{{ props.advisory }}</span>
     </div>
@@ -615,8 +637,12 @@ function configureGraphNode(node: LGraphNode) {
       </div>
     </div>
 
+    <slot name="execution-progress" />
     <div class="canvas-wrap">
       <canvas ref="canvasEl" class="lg-canvas" tabindex="0" :aria-label="t('workflows.nodeEditor')" />
+      <div v-for="(position, id) in nodeLogPositions" :key="id" class="graph-node-log" :style="{ left: position.left + 'px', top: position.top + 'px', width: position.width + 'px', transform: 'scale(' + position.scale + ')' }">
+        <WorkflowNodeLog :node-id="String(id)" :state="nodeStates?.[id]" :logs="nodeLogs?.[id]" :pending="executionVisible" />
+      </div>
     </div>
   </div>
 </template>
@@ -634,4 +660,7 @@ function configureGraphNode(node: LGraphNode) {
 .palette-item:hover { background: #2a2e36; }
 .canvas-wrap { position: relative; flex: 1; overflow: hidden; }
 .lg-canvas { width: 100%; height: 100%; display: block; }
+.graph-node-log { position: absolute; z-index: 1; padding: 0 10px 6px; border-radius: 0 0 6px 6px; background: #262b33; transform-origin: top left; color: #e6e8eb; }
+.graph-node-log :deep(.workflow-node-log) { margin-top: 0; color: #a4aebd; border-color: #3a3f4a; }
+.litegraph-editor > :deep(.workflow-execution-progress) { padding: 10px 12px; background: var(--surface); }
 </style>

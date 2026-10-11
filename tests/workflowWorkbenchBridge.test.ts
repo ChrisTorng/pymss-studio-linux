@@ -37,7 +37,7 @@ function bus() {
   }
 }
 
-async function environment(t: any) {
+async function environment(t: any, preserveInputs = false) {
   setActivePinia(createPinia())
   const mirror = useWorkbenchStore()
   const channel = bus()
@@ -59,7 +59,7 @@ async function environment(t: any) {
       return { jobId: action.jobId || 'retry-1', taskId: action.taskId }
     },
   } })
-  const editor = await createWorkbenchBridge({ label: 'workflow-simple-editor-a', transport: channel.transport('workflow-simple-editor-a'), applyState: mirror.applyRemoteState,
+  const editor = await createWorkbenchBridge({ label: 'workflow-simple-editor-a', transport: channel.transport('workflow-simple-editor-a'), applyState: state => mirror.applyRemoteState(state, preserveInputs),
     bindingFingerprint: key => JSON.stringify(mirror.session(key).bindings),
   })
   t.after(async () => { await editor.dispose(); await host.dispose() })
@@ -133,4 +133,26 @@ test('a delayed session reply preserves files chosen while the editor is connect
     requestId: 'closed-editor:old-request', state: { workflowKey: 'a', jobs: [], session: { ...env.state.session, bindings: createWorkflowBindings() } },
   })
   assert.deepEqual(env.mirror.session('a').bindings.inputs.input.files, ['D:/new-selection.wav'])
+})
+
+test('reopening a simple editor leaves inputs empty without changing an active task snapshot', async t => {
+  const env = await environment(t, true)
+  await env.editor.attach('a')
+  assert.deepEqual(env.mirror.session('a').bindings.inputs, {})
+  env.mirror.session('a').bindings.inputs.input = { files: ['D:/current.wav'] }
+  env.mirror.session('a').bindings.primaryInput = 'input'
+  await env.editor.request({ action: 'run', workflowKey: 'a', bindings: env.mirror.session('a').bindings })
+  env.state.jobs[0].tasks[0].status = 'separating'
+  env.state.jobs[0].tasks[0].runConfig = { workbench: { bindings: JSON.parse(JSON.stringify(env.mirror.session('a').bindings)) } }
+  await env.editor.remember('a', env.mirror.session('a'))
+  await env.editor.dispose()
+  env.mirror.session('a').bindings.inputs = {}
+  env.mirror.session('a').bindings.primaryInput = ''
+  const reopened = await createWorkbenchBridge({ label: 'workflow-simple-editor-a', transport: env.channel.transport('workflow-simple-editor-a'), applyState: state => env.mirror.applyRemoteState(state, true) })
+  t.after(() => reopened.dispose())
+  await reopened.attach('a')
+  assert.deepEqual(env.mirror.session('a').bindings.inputs, {})
+  assert.equal(env.mirror.remoteJobs.a[0].tasks[0].status, 'separating')
+  assert.deepEqual(env.mirror.remoteJobs.a[0].tasks[0].runConfig.workbench.bindings.inputs.input.files, ['D:/current.wav'])
+  assert.equal(env.performed.filter(action => action.action === 'cancel').length, 0)
 })

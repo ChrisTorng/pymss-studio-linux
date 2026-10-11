@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import {
   applyTheme,
@@ -19,6 +19,8 @@ import {
 } from '@/utils/appZoom'
 import { normalizeLocaleSetting, setLocale, type LocaleSetting } from '@/i18n'
 import { isTauriRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
+import { isMainTaskOwner } from '@/utils/taskOwner'
+import { requestEditorExportPreference, type EditorExportPreference } from '@/utils/editorExportPreferences'
 import {
   DEFAULT_CONCURRENT_SEPARATIONS,
   MAX_CONCURRENT_SEPARATIONS,
@@ -293,6 +295,7 @@ export const useSettingsStore = defineStore('settings', () => {
   }))
 
   let saveTimer: ReturnType<typeof setTimeout> | null = null
+  let persistErrorReported = false
   let scaleApplyTimer: ReturnType<typeof setTimeout> | null = null
 
   // 防抖应用缩放：滑块位于它自身控制的 WebView 内，立即 setZoom 会在交互过程中
@@ -306,11 +309,17 @@ export const useSettingsStore = defineStore('settings', () => {
   }
 
   function queuePersist() {
-    if (!initialized.value) return
+    if (!initialized.value || !isMainTaskOwner()) return
     if (saveTimer) clearTimeout(saveTimer)
     saveTimer = setTimeout(() => {
       saveTimer = null
-      void saveAppStore('app-settings', persistable.value)
+      void saveAppStore('app-settings', persistable.value).then(() => {
+        persistErrorReported = false
+      }).catch((error) => {
+        if (persistErrorReported) return
+        persistErrorReported = true
+        console.warn('Failed to persist app settings', error)
+      })
     }, 80)
   }
 
@@ -385,7 +394,7 @@ export const useSettingsStore = defineStore('settings', () => {
     queuePersist()
   })
   watch(developerMode, async () => {
-    if (!initialized.value) return
+    if (!initialized.value || !isMainTaskOwner()) return
     try {
       await saveAppStore('app-settings', persistable.value)
     } catch (error) {
@@ -425,7 +434,7 @@ export const useSettingsStore = defineStore('settings', () => {
   )
 
   async function syncProxyToBackend() {
-    if (!initialized.value || !isTauriRuntime()) return
+    if (!initialized.value || !isTauriRuntime() || !isMainTaskOwner()) return
     await invoke('update_proxy_settings', {
       payload: {
         mode: proxyMode.value,
@@ -778,7 +787,7 @@ export const useSettingsStore = defineStore('settings', () => {
         conflict: null,
         resolvingConflict: false,
       }
-      await finalizeModelDirSwitch(taskId, payload)
+      if (isMainTaskOwner()) await finalizeModelDirSwitch(taskId, payload)
       return
     }
 
@@ -807,7 +816,7 @@ export const useSettingsStore = defineStore('settings', () => {
       // model directory now points at files the migration has moved away. Rebase them.
       // Fire-and-forget: a failure here leaves those models showing as missing with a relink
       // action, which must not turn a completed migration into a failed one.
-      if (payload.sourceModelDir && payload.targetModelDir) {
+      if (isMainTaskOwner() && payload.sourceModelDir && payload.targetModelDir) {
         void invoke('remap_custom_model_paths', {
           payload: { fromRoot: payload.sourceModelDir, toRoot: payload.targetModelDir },
         }).then(() => import('@/stores/model'))
@@ -851,6 +860,25 @@ export const useSettingsStore = defineStore('settings', () => {
 
   async function markStartupOnboardingCompleted() {
     startupOnboardingSeen.value = true
+    if (isMainTaskOwner()) await saveAppStore('app-settings', persistable.value)
+  }
+
+  async function saveEditorExportPreference(preference: EditorExportPreference) {
+    const allowed = preference.format === 'wav' ? ['PCM_16', 'PCM_24', 'FLOAT']
+      : preference.format === 'flac' ? ['PCM_16', 'PCM_24'] : []
+    if (!allowed.includes(preference.bitDepth)) throw new Error('Invalid export bit depth')
+    if (!initialized.value) throw new Error('Settings are not initialized')
+    const owner = isMainTaskOwner()
+    if (!owner) await requestEditorExportPreference(preference)
+    if (preference.format === 'wav') wavBitDepth.value = preference.bitDepth
+    else flacBitDepth.value = preference.bitDepth
+    if (!owner) return
+    // Flush the main window's current settings before acknowledging the export.
+    await nextTick()
+    if (saveTimer) {
+      clearTimeout(saveTimer)
+      saveTimer = null
+    }
     await saveAppStore('app-settings', persistable.value)
   }
 
@@ -896,6 +924,7 @@ export const useSettingsStore = defineStore('settings', () => {
     modelDirMigrationState,
     initialize,
     markStartupOnboardingCompleted,
+    saveEditorExportPreference,
     pickModelDir,
     pickOutputDir,
     pickFolder,

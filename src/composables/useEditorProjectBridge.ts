@@ -23,10 +23,17 @@ export function useEditorProjectBridge(options: UseEditorProjectBridgeOptions) {
 
   let unlistenDrop: UnlistenFn | null = null
   let unlistenOpenProject: UnlistenFn | null = null
+  let disposed = false
+  let projectLoadQueue: Promise<void> = Promise.resolve()
 
-  async function loadProject(projectId: string) {
-    if (!projectId) return
-    await editor.loadProject(projectId)
+  function loadProject(projectId: string) {
+    const operation = projectLoadQueue.catch(() => undefined).then(async () => {
+      if (disposed || !projectId || editor.session?.id === projectId) return
+      if (editor.session) await editor.saveProject()
+      if (!disposed) await editor.loadProject(projectId)
+    })
+    projectLoadQueue = operation
+    return operation
   }
 
   function isPointInAssetPanel(position: { x: number; y: number } | null | undefined) {
@@ -65,7 +72,8 @@ export function useEditorProjectBridge(options: UseEditorProjectBridgeOptions) {
     if (!hasTauriApis) return
 
     try {
-      unlistenDrop = await getCurrentWebview().onDragDropEvent(async (event) => {
+      const removeDrop = await getCurrentWebview().onDragDropEvent(async (event) => {
+        if (disposed) return
         const type = event.payload.type
         if (type === 'over' || type === 'enter') {
           isDraggingExternal.value = isPointInAssetPanel(event.payload.position)
@@ -83,13 +91,19 @@ export function useEditorProjectBridge(options: UseEditorProjectBridgeOptions) {
 
         isDraggingExternal.value = false
       })
+      if (disposed) removeDrop()
+      else unlistenDrop = removeDrop
     } catch {
       // browser preview fallback
     }
 
-    unlistenOpenProject = await listen<{ projectId: string }>('pymss://editor-open-project', (event) => {
+    if (disposed) return
+    const removeOpenProject = await listen<{ projectId: string }>('pymss://editor-open-project', (event) => {
+      if (disposed) return
       void handleProjectLoad(event.payload.projectId)
     })
+    if (disposed) removeOpenProject()
+    else unlistenOpenProject = removeOpenProject
   })
 
   watch(routeProjectId, (projectId, previousProjectId) => {
@@ -99,6 +113,7 @@ export function useEditorProjectBridge(options: UseEditorProjectBridgeOptions) {
   }, { immediate: true })
 
   onBeforeUnmount(() => {
+    disposed = true
     unlistenDrop?.()
     unlistenOpenProject?.()
   })

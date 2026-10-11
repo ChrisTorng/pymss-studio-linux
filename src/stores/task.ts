@@ -7,6 +7,7 @@ import { useSettingsStore } from '@/stores/settings'
 import { useModelStore, type ModelDefaultInferenceParams } from '@/stores/model'
 import { useAppStore } from '@/stores/app'
 import type { WorkflowEntry } from '@/stores/workflow'
+import { appendWorkflowNodeLogs, type WorkflowNodeLogs } from '@/workflows/nodeLogs'
 import { detectWorkflowFormat, WORKFLOW_FORMAT_VERSION } from '@/workflows/formats'
 import {
   getWorkflowDefinitionIssue,
@@ -95,6 +96,7 @@ export type SeparationTask = {
   files: string[]
   outputs: StemOutput[]
   logs: string[]
+  nodeLogs?: WorkflowNodeLogs
   error?: string
   runConfig?: SeparationRunConfig
   nodeStates?: Record<string, WorkflowNodeState>
@@ -399,6 +401,7 @@ function normalizeTask(task: Partial<SeparationTask>): SeparationTask {
     error: interrupted ? '应用关闭或重启导致任务中断' : task.error,
     runConfig: normalizedRunConfig,
     nodeStates: task.nodeStates,
+    nodeLogs: task.nodeLogs,
     currentNodeId: interrupted ? undefined : task.currentNodeId,
     taskHidden: task.taskHidden === true,
     resultHidden: task.resultHidden === true,
@@ -781,7 +784,7 @@ export const useTaskStore = defineStore('task', () => {
     ])
     tasks.value = (stored?.tasks || []).map((task) => normalizeTask(task))
     activeTaskId.value = tasks.value[0]?.id || null
-    separateRunMode.value = separateStored?.runMode === 'workflow' ? 'workflow' : 'model'
+    separateRunMode.value = 'model'
     ensembleEnabled.value = separateStored?.ensembleEnabled === true
     ensembleModels.value = Array.isArray(separateStored?.ensembleModels)
       ? separateStored.ensembleModels.map(item => String(item || '').trim()).filter(Boolean)
@@ -1172,7 +1175,7 @@ export const useTaskStore = defineStore('task', () => {
             workflowName: config.workflowName || task.model,
             workflow: config.workflowDefinition || {},
             input: task.input || null,
-            ...(config.workbench ? { workbench: true, inputs: config.workbench.inputs, workbenchOutputs: config.workbench.outputs } : {}),
+            ...(config.workbench && !config.workbench.nativeGraph ? { workbench: true, inputs: config.workbench.inputs, workbenchOutputs: config.workbench.outputs } : {}),
             output: config.outputLayout === 'folders' ? (task.jobOutput || task.output) : task.output,
             modelDir: config.modelDir ?? (settings.modelDir || null),
             source: config.downloadSource || settings.downloadSource,
@@ -1301,13 +1304,13 @@ export const useTaskStore = defineStore('task', () => {
           workflowName: config.workflowName || primary.model,
           workflow: config.workflowDefinition || {},
           output: primary.jobOutput || primary.output,
-          ...(config.workbench ? { workbench: true } : {}),
+          ...(config.workbench && !config.workbench.nativeGraph ? { workbench: true } : {}),
           tasks: batchTasks.map((task, index) => ({
             taskId: task.id,
             input: task.input,
             output: task.output,
             inputIndex: index + 1,
-            ...(task.runConfig?.workbench ? { inputs: task.runConfig.workbench.inputs, workbenchOutputs: task.runConfig.workbench.outputs } : {}),
+            ...(task.runConfig?.workbench && !task.runConfig.workbench.nativeGraph ? { inputs: task.runConfig.workbench.inputs, workbenchOutputs: task.runConfig.workbench.outputs } : {}),
           })),
           modelDir: config.modelDir ?? (settings.modelDir || null),
           source: config.downloadSource || settings.downloadSource,
@@ -1411,8 +1414,15 @@ export const useTaskStore = defineStore('task', () => {
       if (nodeId && typeof nodeProgress === 'number' && Number.isFinite(nodeProgress)) {
         const fraction = clamp(nodeProgress, 0, 1)
         task.nodeStates ||= {}
-        task.nodeStates[nodeId] = { status: fraction >= 1 ? 'done' : 'running', progress: fraction * 100 }
-        task.currentNodeId = fraction < 1 ? nodeId : undefined
+        const previous = task.nodeStates[nodeId]
+        const complete = fraction >= 1 && event.payload?.audioIndex == null && event.payload?.unit == null
+        const status = complete ? 'done' : 'running'
+        if (detail && (!previous || previous.status !== status || previous.message !== detail)) {
+          const transition = status === 'done' && previous?.status !== 'done' ? 'Node completed: ' : !previous ? 'Node started: ' : ''
+          appendWorkflowNodeLogs(task, nodeId, `[info] ${new Date().toLocaleTimeString()} ${transition}${detail}`)
+        }
+        task.nodeStates[nodeId] = { status, progress: fraction * 100, message: detail }
+        task.currentNodeId = complete ? undefined : nodeId
       }
       task.status = stage
       if (stage !== 'queued') markTaskStarted(task)
@@ -1434,7 +1444,10 @@ export const useTaskStore = defineStore('task', () => {
       const settings = useSettingsStore()
       const level = String(event.payload?.level || 'info')
       const message = String(event.payload?.message || '')
-      appendTaskLogs(task, settings.developerMode ? `[${level}] ${message}` : `${level}: ${message}`)
+      const detail: string = typeof event.payload?.detail === 'string' ? event.payload.detail : ''
+      const lines = [settings.developerMode ? `[${level}] ${message}` : `${level}: ${message}`, ...(detail ? detail.split(/\r?\n/).map(line => `[${level}] ${line}`) : [])]
+      appendTaskLogs(task, lines)
+      appendWorkflowNodeLogs(task, typeof event.payload?.nodeId === 'string' ? event.payload.nodeId : undefined, lines)
     } else if (event.type === 'error') {
       if (isTerminalTaskStatus(task.status)) return
       if (task.runConfig?.workbench && Array.isArray(event.payload?.outputs)) {
@@ -1451,6 +1464,8 @@ export const useTaskStore = defineStore('task', () => {
       const code = codeValue ? `[${codeValue}] ` : ''
       const message = resolveTaskErrorMessage(codeValue, event.payload?.message, task.input)
       const detail = event.payload?.detail || ''
+      appendWorkflowNodeLogs(task, typeof event.payload?.nodeId === 'string' ? event.payload.nodeId : task.currentNodeId,
+        [`[error] ${message}`, ...String(detail).split(/\r?\n/).filter(Boolean).map(line => `[error] ${line}`)])
       const recoverable = Boolean(event.payload?.recoverable)
       task.error = message
       task.message = message
@@ -1501,6 +1516,7 @@ export const useTaskStore = defineStore('task', () => {
     } else if (event.type === 'task_cancelled') {
       if (isTerminalTaskStatus(task.status)) return
       if (task.currentNodeId && task.nodeStates?.[task.currentNodeId]) task.nodeStates[task.currentNodeId].status = 'cancelled'
+      appendWorkflowNodeLogs(task, task.currentNodeId, `[info] ${event.payload?.message || 'Cancelled'}`)
       task.status = 'cancelled'
       markTaskStarted(task)
       task.message = event.payload?.message || 'Cancelled'
@@ -1773,6 +1789,7 @@ export const useTaskStore = defineStore('task', () => {
     const cancelled = await invoke<boolean>('cancel_task', { taskId: id })
     if (cancelled) {
       if (task.currentNodeId && task.nodeStates?.[task.currentNodeId]) task.nodeStates[task.currentNodeId].status = 'cancelled'
+      appendWorkflowNodeLogs(task, task.currentNodeId, '[info] Cancelled')
       task.status = 'cancelled'
       task.message = 'Cancelled'
       task.stageLabel = STAGE_META.cancelled.label
@@ -2026,13 +2043,16 @@ export const useTaskStore = defineStore('task', () => {
     if (validationError) throw new Error(validationError)
     const directory = resolveOutputDirectory(undefined, useSettingsStore().outputDir)
     const prepared = prepareWorkbenchRun(workflow.definition, bindings, directory)
+    const nativeGraph = detectWorkflowFormat(workflow.definition) === 'graph'
     const jobId = createRunId('job')
     const runtimeEntry = { ...workflow, definition: prepared.definition }
     const createdTasks = prepared.runs.map(run => {
-      const created = createQueuedWorkflowTask(run.input, runtimeEntry, jobId, directory, bindings.outputLayout)
-      tasks.value.find(task => task.id === created.id)!.runConfig!.useTta = false
-      tasks.value.find(task => task.id === created.id)!.runConfig!.workbench = {
-        version: 1, sourceUpdatedAt: workflow.updatedAt,
+      const created = createQueuedWorkflowTask(run.input, runtimeEntry, jobId, directory, nativeGraph ? 'flat' : bindings.outputLayout)
+      const config = tasks.value.find(task => task.id === created.id)!.runConfig!
+      config.useTta = false
+      if (nativeGraph) config.workflowDefinition = cloneWorkflow(workflow.definition)
+      config.workbench = {
+        version: 1, ...(nativeGraph ? { nativeGraph: true as const } : {}), sourceUpdatedAt: workflow.updatedAt,
         sourceDefinition: cloneWorkflow(workflow.definition), bindings: cloneWorkflow(bindings),
         inputs: cloneWorkflow(run.inputs), outputs: cloneWorkflow(run.outputs),
       }

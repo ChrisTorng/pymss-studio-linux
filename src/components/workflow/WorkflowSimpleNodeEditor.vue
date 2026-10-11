@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useDialog, useMessage, type DropdownOption, type SelectInst } from 'naive-ui'
+import { useDialog, useMessage, type DropdownOption, type InputInst, type SelectInst } from 'naive-ui'
 import {
   ArrowRedoOutline,
   ArrowUndoOutline,
   CloseOutline,
+  ExpandOutline,
   LocateOutline,
-  SaveOutline,
   SettingsOutline,
 } from '@vicons/ionicons5'
 import { WORKFLOW_NODE_STATUS_KEYS, type WorkflowNodeState } from '@/workflows/workbench'
+import WorkflowNodeLog from '@/components/workflow/WorkflowNodeLog.vue'
+import type { WorkflowNodeLogs } from '@/workflows/nodeLogs'
 import type { ModelDefaultInferenceParams, ModelEntry } from '@/stores/model'
 import AlignedInferenceInputNumber from '@/components/AlignedInferenceInputNumber.vue'
 import { inferenceChunkSizeIssue, resolveInferenceChunkStep, resolveInferenceSampleStep } from '@/features/inference/sampleStep'
@@ -56,36 +58,59 @@ import {
 
 const draft = defineModel<SimpleDraft>('draft', { required: true })
 const name = defineModel<string>('name', { required: true })
-const description = defineModel<string>('description', { required: true })
 
 const props = withDefaults(defineProps<{
   models: ModelEntry[]
   readonly?: boolean
   runtimeControls?: boolean
   nodeStates?: Record<string, WorkflowNodeState>
+  nodeLogs?: WorkflowNodeLogs
+  executionVisible?: boolean
   nodeSummaries?: Record<string, string>
   modelInferenceOverrides?: Record<string, ModelDefaultInferenceParams>
   saving?: boolean
   formError?: string
   advisory?: string
-  canSave?: boolean
   canRun?: boolean
 }>(), {
   modelInferenceOverrides: () => ({}),
   saving: false,
   formError: '',
   advisory: '',
-  canSave: false,
   canRun: false,
 })
 
 const emit = defineEmits<{
-  save: []
   close: []
   run: []
+  'output-settings': []
+  'name-editing': [editing: boolean]
 }>()
 
 const { t, locale } = useI18n()
+const editingName = ref(false)
+const showWorkflowSettings = ref(false)
+const nameBeforeEdit = ref('')
+const nameInputRef = ref<InputInst | null>(null)
+function beginNameEdit() {
+  if (props.readonly) return
+  nameBeforeEdit.value = name.value
+  editingName.value = true
+  emit('name-editing', true)
+  void nextTick(() => nameInputRef.value?.focus())
+}
+function finishNameEdit() {
+  if (!editingName.value) return
+  name.value = name.value.trim() || nameBeforeEdit.value.trim() || t('workflows.newWorkflow')
+  editingName.value = false
+  emit('name-editing', false)
+}
+function cancelNameEdit() {
+  name.value = nameBeforeEdit.value || t('workflows.newWorkflow')
+  editingName.value = false
+  emit('name-editing', false)
+}
+defineExpose({ finishNameEdit })
 const message = useMessage()
 const dialog = useDialog()
 const connectionMessageKeys: Record<string, string> = {
@@ -137,7 +162,7 @@ let lastHistoryAt = 0
 
 const NODE_WIDTH = 300
 const ENSEMBLE_WIDTH = 320
-const INPUT_WIDTH = 230
+const INPUT_WIDTH = 280
 const SAVE_WIDTH = 340
 const NODE_HEIGHT_BASE = 166
 const PORT_GAP = 26
@@ -1345,7 +1370,7 @@ function isEditableKeyboardTarget(target: EventTarget | null) {
 }
 
 function onKeydown(event: KeyboardEvent) {
-  if (props.readonly) return
+  if (props.readonly || (event.target as HTMLElement)?.closest?.('.n-modal, .n-drawer')) return
   if (event.key === 'Escape' && pendingConnection.value) {
     pendingConnection.value = null
     hoverTarget.value = null
@@ -1402,26 +1427,30 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="simple-node-editor" :class="{ 'simple-node-editor--readonly': readonly }">
-    <header class="simple-node-editor__topbar" :inert="readonly">
+    <header class="simple-node-editor__topbar">
       <div class="simple-node-editor__title">
-        <span>{{ t('workflows.simpleCreator') }}</span>
-        <n-input v-model:value="name" size="small" :placeholder="t('workflows.namePlaceholder')" />
+        <button v-if="!editingName" type="button" class="simple-name-trigger" :title="name" :disabled="readonly" @click="beginNameEdit">{{ name || t('workflows.untitled') }}</button>
+        <n-input v-else ref="nameInputRef" v-model:value="name" size="small" :placeholder="t('workflows.namePlaceholder')" @blur="finishNameEdit" @keydown.enter.prevent="finishNameEdit" @keydown.esc.prevent="cancelNameEdit" />
+        <slot v-if="!readonly" name="save-status" />
       </div>
       <div class="simple-node-editor__actions">
-        <n-button size="small" secondary :disabled="history.length <= 1" @click="undo"><template #icon><n-icon :component="ArrowUndoOutline" /></template>{{ t('common.undo') }}</n-button>
-        <n-button size="small" secondary :disabled="!future.length" @click="redo"><template #icon><n-icon :component="ArrowRedoOutline" /></template>{{ t('common.redo') }}</n-button>
-        <n-button size="small" secondary @click="openNodeTypeChooser()">{{ t('workflows.addStep') }}</n-button>
-        <n-button size="small" secondary @click="autoLayout"><template #icon><n-icon :component="LocateOutline" /></template>{{ t('workflows.autoLayout') }}</n-button>
-        <n-button size="small" type="primary" :loading="saving" :disabled="!canSave" @click="emit('save')"><template #icon><n-icon :component="SaveOutline" /></template>{{ t('common.save') }}</n-button>
+        <div v-if="!readonly" class="simple-node-editor__action-group">
+          <n-button size="small" quaternary circle :title="t('common.undo')" :aria-label="t('common.undo')" :disabled="history.length <= 1" @click="undo"><template #icon><n-icon :component="ArrowUndoOutline" /></template></n-button>
+          <n-button size="small" quaternary circle :title="t('common.redo')" :aria-label="t('common.redo')" :disabled="!future.length" @click="redo"><template #icon><n-icon :component="ArrowRedoOutline" /></template></n-button>
+          <n-button size="small" secondary @click="openNodeTypeChooser()">{{ t('workflows.addStep') }}</n-button>
+        </div>
+        <div class="simple-node-editor__action-group">
+          <n-button size="small" quaternary @click="fitView"><template #icon><n-icon :component="ExpandOutline" /></template>{{ t('workflows.fitView') }}</n-button>
+          <n-button size="small" quaternary circle :title="t('workflows.settingsAction')" :aria-label="t('workflows.settingsAction')" @click="showWorkflowSettings = true"><template #icon><n-icon :component="SettingsOutline" /></template></n-button>
+        </div>
+        <div v-if="!readonly" class="simple-node-editor__action-group simple-node-editor__action-group--run">
+          <slot name="run-controls"><n-button size="small" type="primary" :disabled="!canRun || saving" @click="emit('run')">{{ t('workflows.runWorkflowAction') }}</n-button></slot>
+        </div>
       </div>
+      <span v-if="formError" class="simple-node-editor__notice simple-node-editor__error" role="alert">{{ formError }}</span>
+      <span v-else-if="advisory" class="simple-node-editor__notice simple-node-editor__warning">{{ advisory }}</span>
+      <slot name="execution-progress" />
     </header>
-
-    <div class="simple-node-editor__meta" :inert="readonly">
-      <n-input v-model:value="description" size="small" :placeholder="t('workflows.descriptionPlaceholder')" />
-      <label><span>{{ t('workflows.defaultDevice') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
-      <label><span>{{ t('workflows.defaultFormat') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-format', instance)" v-model:value="draft.defaultFormat" size="small" :options="[{ label: 'WAV', value: 'wav' }, { label: 'FLAC', value: 'flac' }, { label: 'MP3', value: 'mp3' }, { label: 'M4A', value: 'm4a' }]" /></label>
-      <label><span>{{ t('workflows.defaultNormalize') }}</span><n-select v-model:value="defaultNormalizeMode" size="small" :options="defaultNormalizeOptions" /></label>
-    </div>
 
     <div ref="canvasRef" class="simple-node-editor__canvas" @wheel="handleWheel" @pointermove="moveCanvas" @pointerup="endCanvasPointer" @pointercancel="endCanvasPointer" @pointerdown="beginCanvasPan" @dblclick="handleCanvasDoubleClick" @contextmenu.prevent="openCanvasContextMenu">
       <div class="simple-node-editor__hint">{{ pendingConnection ? t('workflows.connectingFrom') + ': ' + pendingConnection.label : t('workflows.simpleEditorHint') }}</div>
@@ -1436,10 +1465,11 @@ onBeforeUnmount(() => {
 
         <article class="simple-node simple-node--input" data-simple-node="input" :style="{ ...nodeStyle('input'), width: `${INPUT_WIDTH}px` }" @pointerdown.stop="beginNodeDrag('input', $event)">
           <header><span>{{ t('workflows.inputNode') }}</span><strong>{{ t('workflows.originalInput') }}</strong></header>
-          <div v-if="nodeStates?.['input']" class="simple-execution-state" :data-node-status="nodeStates['input'].status">{{ t(WORKFLOW_NODE_STATUS_KEYS[nodeStates['input'].status]) }} · {{ Math.round(nodeStates['input'].progress) }}%</div>
+          <span v-if="nodeStates?.['input']" class="simple-execution-state" :data-node-status="nodeStates['input'].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates['input'].status]) + ' · ' + Math.round(nodeStates['input'].progress) + '%'" />
           <button :ref="el => setPortElement('input:output', el)" class="simple-port simple-port--output" :class="{ 'simple-port--source-target': pendingConnection?.direction === 'output' && hoverTarget === 'output:input' }" data-simple-source="input" type="button" @pointerdown.stop="beginConnection('input', $event)" @pointerup.stop="finishOutputConnection('input', $event)"><span>{{ t('workflows.audioOutput') }}</span><i /></button>
-          <div v-if="readonly && nodeSummaries?.input" class="simple-execution-state" :title="nodeSummaries.input">{{ nodeSummaries.input }}</div>
+          <div v-if="readonly && nodeSummaries?.input" class="simple-execution-summary" :title="nodeSummaries.input">{{ nodeSummaries.input }}</div>
           <slot v-if="!readonly" name="runtime-input" />
+          <WorkflowNodeLog node-id="input" :state="nodeStates?.input" :logs="nodeLogs?.input" :pending="executionVisible" />
         </article>
 
         <article v-for="(step, index) in draft.steps" :key="step.id" class="simple-node simple-node--step" :class="{ 'simple-node--selected': selectedNodeId === step.id }" :style="{ ...nodeStyle(step.id), width: `${NODE_WIDTH}px`, minHeight: `${stepHeight(step)}px` }" :data-simple-node="step.id" @pointerdown.stop="beginNodeDrag(step.id, $event)">
@@ -1462,7 +1492,7 @@ onBeforeUnmount(() => {
               <button type="button" class="simple-icon-button" :title="t('workflows.removeStep')" :disabled="draft.steps.length <= 1" @pointerdown.stop @click.stop="removeStep(step)"><n-icon :component="CloseOutline" /></button>
             </span>
           </header>
-          <div v-if="nodeStates?.[step.id]" class="simple-execution-state" :data-node-status="nodeStates[step.id].status">{{ t(WORKFLOW_NODE_STATUS_KEYS[nodeStates[step.id].status]) }} · {{ Math.round(nodeStates[step.id].progress) }}%</div>
+          <span v-if="nodeStates?.[step.id]" class="simple-execution-state" :data-node-status="nodeStates[step.id].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates[step.id].status]) + ' · ' + Math.round(nodeStates[step.id].progress) + '%'" />
           <div class="simple-node__input-wrap" @pointerdown.stop>
             <button :ref="el => setPortElement(`input:${step.id}`, el)" class="simple-port simple-port--input" :class="{ 'simple-port--target': pendingConnection?.direction === 'input' && hoverTarget === `step:${step.id}` }" type="button" :data-simple-target="`step:${step.id}`" @pointerdown.stop="beginInputConnection(step, $event)" @pointerup.stop="finishConnection(`step:${step.id}`, $event)"><i /><span>{{ step.input || t('workflows.stepInputPlaceholder') }}</span></button>
           </div>
@@ -1477,11 +1507,12 @@ onBeforeUnmount(() => {
             </div>
             <span v-if="!step.stems.length" class="simple-node__empty">{{ t('workflows.noStemPorts') }}</span>
           </div>
+          <WorkflowNodeLog :node-id="step.id" :state="nodeStates?.[step.id]" :logs="nodeLogs?.[step.id]" :pending="executionVisible" />
         </article>
 
         <article v-for="(ensemble, index) in draft.ensembles" :key="ensemble.id" class="simple-node simple-node--ensemble" :class="{ 'simple-node--selected': selectedNodeId === ensemble.id, 'simple-node--audio-operation': isSimpleAudioOperation(ensemble.algorithm) }" :style="{ ...nodeStyle(ensemble.id), width: `${ENSEMBLE_WIDTH}px`, minHeight: `${ensembleHeight(ensemble)}px` }" :data-simple-node="ensemble.id" :data-audio-operation="isSimpleAudioOperation(ensemble.algorithm) ? ensemble.algorithm : undefined" @pointerdown.stop="beginNodeDrag(ensemble.id, $event)">
           <header><div><span>{{ processingNodeLabel(ensemble) }} {{ index + 1 }}</span><strong>{{ ensemble.outputStem || t('workflows.ensembleStemPlaceholder') }}</strong></div><button type="button" class="simple-icon-button" :title="isSimpleAudioOperation(ensemble.algorithm) ? t('workflows.removeAudioOperation') : t('workflows.removeEnsemble')" @pointerdown.stop @click.stop="removeEnsemble(ensemble)"><n-icon :component="CloseOutline" /></button></header>
-          <div v-if="nodeStates?.[ensemble.id]" class="simple-execution-state" :data-node-status="nodeStates[ensemble.id].status">{{ t(WORKFLOW_NODE_STATUS_KEYS[nodeStates[ensemble.id].status]) }} · {{ Math.round(nodeStates[ensemble.id].progress) }}%</div>
+          <span v-if="nodeStates?.[ensemble.id]" class="simple-execution-state" :data-node-status="nodeStates[ensemble.id].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates[ensemble.id].status]) + ' · ' + Math.round(nodeStates[ensemble.id].progress) + '%'" />
           <div class="simple-node__body" @pointerdown.stop>
             <p v-if="isSimpleAudioOperation(ensemble.algorithm)" class="simple-audio-operation-hint">{{ audioOperationCopy[ensemble.algorithm].hint }}</p>
             <label v-else><span>{{ t('workflows.ensembleType') }}</span><n-select :ref="(instance: unknown) => setSelectInstance(`ensemble-algorithm:${ensemble.id}`, instance)" :value="ensemble.algorithm" size="small" :options="ensembleAlgorithmOptions" @update:value="updateEnsembleAlgorithm(ensemble, String($event || ''))" /></label>
@@ -1501,11 +1532,12 @@ onBeforeUnmount(() => {
             <n-button size="tiny" :type="ensemble.save ? 'primary' : 'default'" secondary @pointerdown.stop @click.stop="toggleEnsembleSave(ensemble)">{{ ensemble.save ? t('workflows.savedOutput') : t('workflows.saveStems') }}</n-button>
             <button :ref="el => setPortElement(outputPortKey(ensemble.id, ensemble.outputStem.trim()), el)" class="simple-ensemble-output-port" :class="{ 'simple-ensemble-output-port--target': pendingConnection?.direction === 'output' && hoverTarget === `output:${simpleOutputRef(ensemble.id, ensemble.outputStem.trim())}` }" :aria-label="ensemble.outputStem || t('workflows.ensembleOutput')" :data-simple-source="simpleOutputRef(ensemble.id, ensemble.outputStem.trim())" type="button" @pointerdown.stop="beginConnection(simpleOutputRef(ensemble.id, ensemble.outputStem.trim()), $event)" @pointerup.stop="finishOutputConnection(simpleOutputRef(ensemble.id, ensemble.outputStem.trim()), $event)"><i /></button>
           </div>
+          <WorkflowNodeLog :node-id="ensemble.id" :state="nodeStates?.[ensemble.id]" :logs="nodeLogs?.[ensemble.id]" :pending="executionVisible" />
         </article>
 
         <article class="simple-node simple-node--save" data-simple-node="save" :style="{ ...nodeStyle('save'), width: `${SAVE_WIDTH}px`, minHeight: `${saveHeight()}px` }" @pointerdown.stop="beginNodeDrag('save', $event)">
-          <header><div><span>{{ t('workflows.saveNode') }}</span><strong>{{ t('workflows.generatedOutputs') }}</strong></div><span class="simple-node__count">{{ saveEntries().length }}</span></header>
-          <div v-if="nodeStates?.['save']" class="simple-execution-state" :data-node-status="nodeStates['save'].status">{{ t(WORKFLOW_NODE_STATUS_KEYS[nodeStates['save'].status]) }} · {{ Math.round(nodeStates['save'].progress) }}%</div>
+          <header><div><span>{{ t('workflows.saveNode') }}</span><strong>{{ t('workflows.generatedOutputs') }}</strong></div><span class="simple-node__header-actions"><span class="simple-node__count">{{ saveEntries().length }}</span><button v-if="!readonly && runtimeControls" type="button" class="simple-icon-button simple-save-settings" :title="t('separate.output')" :aria-label="t('separate.output')" @pointerdown.stop @click.stop="emit('output-settings')"><n-icon :component="SettingsOutline" /></button></span></header>
+          <span v-if="nodeStates?.['save']" class="simple-execution-state" :data-node-status="nodeStates['save'].status" :title="t(WORKFLOW_NODE_STATUS_KEYS[nodeStates['save'].status]) + ' · ' + Math.round(nodeStates['save'].progress) + '%'" />
           <button class="simple-save-drop-target" :class="{ 'simple-save-drop-target--active': pendingConnection && hoverTarget === 'save' }" type="button" data-simple-target="save" @pointerdown.stop @pointerup="finishConnection('save', $event)">{{ t('workflows.dropStemToSave') }}</button>
           <div v-for="(entry, index) in saveEntries()" :key="entry.source" class="simple-save-row">
             <i :ref="el => setPortElement(savePortKey(simpleSourceStepId(entry.source), entry.stem), el)" class="simple-save-row__port" :class="{ 'simple-save-row__port--active': pendingConnection?.direction === 'output' && pendingConnection.target === simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem), 'simple-save-row__port--target': pendingConnection?.direction === 'input' && hoverTarget === simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem) }" :data-simple-target="simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem)" @pointerdown.stop="beginSaveConnection(entry.source, `${entry.sourceLabel} · ${entry.stem}`, $event)" @pointerup.stop="finishConnection(simpleSaveTarget(simpleSourceStepId(entry.source), entry.stem), $event)" />
@@ -1523,19 +1555,20 @@ onBeforeUnmount(() => {
             </div>
           </div>
           <span v-if="!saveEntries().length" class="simple-node__empty">{{ t('workflows.saveStemsPlaceholder') }}</span>
-          <div v-if="readonly && nodeSummaries?.save" class="simple-execution-state" :title="nodeSummaries.save">{{ nodeSummaries.save }}</div>
-          <slot v-if="!readonly" name="runtime-output" />
+          <div v-if="readonly && nodeSummaries?.save" class="simple-execution-summary" :title="nodeSummaries.save">{{ nodeSummaries.save }}</div>
+          <WorkflowNodeLog node-id="save" :state="nodeStates?.save" :logs="nodeLogs?.save" :pending="executionVisible" />
         </article>
       </div>
     </div>
 
-    <footer class="simple-node-editor__footer" :inert="readonly">
-      <span v-if="formError" class="simple-node-editor__error">{{ formError }}</span>
-      <span v-else-if="advisory" class="simple-node-editor__warning">{{ advisory }}</span>
-      <span v-else>{{ t('workflows.simpleEditorHint') }}</span>
-      <div><n-button v-if="!runtimeControls" secondary :disabled="!canRun || saving" @click="emit('run')">{{ t('workflows.runWorkflowAction') }}</n-button><n-button quaternary @click="fitView">{{ t('workflows.fitView') }}</n-button></div>
-    </footer>
-
+    <n-modal v-model:show="showWorkflowSettings" preset="card" :title="t('workflows.settingsAction')" class="simple-workflow-settings-modal" style="width: min(440px, calc(100vw - 32px))">
+      <div class="simple-node-editor__defaults">
+        <label><span>{{ t('workflows.defaultDevice') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-device', instance)" v-model:value="draft.defaultDevice" :disabled="readonly" size="small" :options="[{ label: 'Auto', value: 'auto' }, { label: 'CPU', value: 'cpu' }, { label: 'CUDA', value: 'cuda' }, { label: 'MPS', value: 'mps' }, { label: 'MLX', value: 'mlx' }]" /></label>
+        <label><span>{{ t('workflows.defaultFormat') }}</span><n-select :ref="(instance: unknown) => setSelectInstance('default-format', instance)" v-model:value="draft.defaultFormat" :disabled="readonly" size="small" :options="[{ label: 'WAV', value: 'wav' }, { label: 'FLAC', value: 'flac' }, { label: 'MP3', value: 'mp3' }, { label: 'M4A', value: 'm4a' }]" /></label>
+        <label><span>{{ t('workflows.defaultNormalize') }}</span><n-select v-model:value="defaultNormalizeMode" :disabled="readonly" size="small" :options="defaultNormalizeOptions" /></label>
+      </div>
+      <template #footer><div class="simple-workflow-settings-actions"><n-button v-if="!readonly" size="small" secondary @click="autoLayout(); showWorkflowSettings = false"><template #icon><n-icon :component="LocateOutline" /></template>{{ t('workflows.autoLayout') }}</n-button><n-button size="small" secondary @click="showWorkflowSettings = false">{{ t('common.close') }}</n-button></div></template>
+    </n-modal>
     <n-modal v-model:show="showNodeTypeChooser" preset="card" :title="t('workflows.chooseNodeTypeTitle')" class="simple-node-type-modal" style="width: min(640px, calc(100vw - 32px))" :z-index="5000">
       <p class="simple-node-type-modal__hint">{{ t('workflows.chooseNodeTypeHint') }}</p>
       <div class="simple-node-type-modal__choices">
@@ -1651,15 +1684,16 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .simple-node-editor--readonly .simple-node { pointer-events: none; }
-.simple-execution-state { word-break: break-all; max-height: 64px; overflow: auto; font-size: 12px; padding: 6px 12px; color: var(--primary); }
-.simple-execution-state[data-node-status="done"] { color: var(--success); }
-.simple-execution-state[data-node-status="failed"] { color: var(--danger); }
+.simple-execution-state { position: absolute; left: 3px; top: 12px; width: 6px; height: 6px; border-radius: 50%; background: var(--primary); }
+.simple-execution-state[data-node-status="done"] { background: var(--success); }
+.simple-execution-state[data-node-status="failed"] { background: var(--danger); }
+.simple-execution-summary { padding: 6px 12px; font-size: 12px; overflow-wrap: anywhere; max-height: 64px; overflow: auto; color: var(--primary); }
 
 .simple-node-editor {
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
   padding: 0 12px 12px;
   overflow: hidden;
@@ -1667,9 +1701,7 @@ onBeforeUnmount(() => {
   color: var(--on-surface);
 }
 
-.simple-node-editor__topbar,
-.simple-node-editor__meta,
-.simple-node-editor__footer {
+.simple-node-editor__topbar {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1685,66 +1717,67 @@ onBeforeUnmount(() => {
 .simple-node-editor__topbar {
   min-height: 58px;
   justify-content: space-between;
+  flex-wrap: wrap;
 }
 
 .simple-node-editor__title {
-  display: grid;
-  grid-template-columns: auto minmax(200px, min(380px, 42vw));
+  display: flex;
   align-items: center;
+  min-width: 180px;
   gap: 10px;
-  min-width: 260px;
+  flex: 1 1 280px;
 }
 
-.simple-node-editor__title > span {
-  color: var(--on-surface-muted);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: .02em;
+.simple-name-trigger {
+  min-width: 0;
+  max-width: min(320px, 100%);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--on-surface);
+  font: inherit;
+  font-size: 18px;
+  font-weight: 800;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: text;
 }
+.simple-name-trigger:not(:disabled):hover { color: var(--primary-strong); }
 
 .simple-node-editor__title :deep(.n-input) {
-  width: 100%;
+  width: 240px;
 }
 
 .simple-node-editor__actions {
   display: flex;
-  gap: 7px;
+  align-items: center;
+  gap: 12px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  min-width: 0;
 }
 
-.simple-node-editor__meta {
-  min-height: 52px;
-  padding: 8px 12px;
-  border: 1px solid color-mix(in srgb, var(--outline) 70%, transparent);
-  border-radius: 12px;
-  border-bottom-color: color-mix(in srgb, var(--outline) 72%, transparent);
-  background: color-mix(in srgb, var(--surface-1) 94%, var(--surface-2));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--outline) 24%, transparent);
-}
+.simple-node-editor__action-group { display: flex; align-items: center; gap: 6px; }
+.simple-node-editor__action-group + .simple-node-editor__action-group { padding-left: 12px; border-left: 1px solid var(--outline); }
+.simple-node-editor__action-group--run { flex-wrap: wrap; }
+.simple-node-editor__actions :deep(.workflow-run-controls) { flex-wrap: wrap; }
+.simple-node-editor__notice { flex: 1 0 100%; font-size: 12px; line-height: 1.5; }
 
-.simple-node-editor__meta > :first-child {
-  flex: 1 1 auto;
-  min-width: 200px;
-}
-
-.simple-node-editor__meta label {
+.simple-node-editor__defaults { display: grid; gap: 14px; }
+.simple-node-editor__defaults label {
   display: flex;
   align-items: center;
-  gap: 7px;
+  justify-content: space-between;
+  gap: 12px;
   color: var(--on-surface-muted);
   font-size: 11px;
   white-space: nowrap;
 }
 
-.simple-node-editor__meta label :deep(.n-select) {
-  width: 120px;
-}
-
-.simple-node-editor__switch {
-  margin-left: auto;
-}
+.simple-node-editor__defaults label :deep(.n-select) { width: 220px; }
+.simple-workflow-settings-actions { display: flex; justify-content: space-between; gap: 12px; }
 
 .simple-node-editor__canvas {
   position: relative;
@@ -1926,6 +1959,7 @@ onBeforeUnmount(() => {
   background: color-mix(in srgb, var(--primary) 12%, transparent);
   color: var(--primary-strong);
 }
+.simple-save-settings:hover { background: color-mix(in srgb, var(--primary) 12%, transparent); color: var(--primary-strong); }
 .simple-icon-button:focus-visible,
 .simple-port:focus-visible,
 .simple-ensemble-output-port:focus-visible,
@@ -2061,19 +2095,6 @@ onBeforeUnmount(() => {
 .simple-save-row__port--active { outline: 2px solid var(--warning); outline-offset: 2px; }
 .simple-save-row__port--target { outline: 2px solid var(--primary); outline-offset: 2px; }
 
-.simple-node-editor__footer {
-  justify-content: space-between;
-  min-height: 52px;
-  border-top: 1px solid color-mix(in srgb, var(--outline) 78%, transparent);
-  border-bottom: 1px solid color-mix(in srgb, var(--outline) 78%, transparent);
-  border-radius: 12px;
-  background: var(--surface-1);
-  color: var(--on-surface-muted);
-  font-size: 11px;
-}
-
-.simple-node-editor__footer > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.simple-node-editor__footer > div { display: flex; gap: 8px; flex: 0 0 auto; }
 .simple-node-editor__error { color: var(--danger); }
 .simple-node-editor__warning { color: var(--warning); }
 
@@ -2164,13 +2185,8 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 900px) {
-  .simple-node-editor__meta { flex-wrap: wrap; }
-  .simple-node-editor__switch { margin-left: 0; }
-  .simple-node-editor__topbar { align-items: flex-start; flex-direction: column; }
-  .simple-node-editor__title { width: 100%; grid-template-columns: auto minmax(0, 1fr); }
-  .simple-node-editor__footer { align-items: flex-start; flex-direction: column; }
-  .simple-node-editor__footer > span { width: 100%; }
-  .simple-node-editor__footer > div { width: 100%; flex-wrap: wrap; }
+  .simple-node-editor__title { min-width: 0; }
+  .simple-node-editor__actions { width: 100%; }
   .simple-node-type-modal__choices { grid-template-columns: 1fr; }
   .simple-inference-grid { grid-template-columns: 1fr; }
 }

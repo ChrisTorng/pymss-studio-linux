@@ -42,7 +42,7 @@ const { __setRegisterWorkerEventsForTest } = await vite.ssrLoadModule('/src/util
 function installTauriInvoke(invoke) {
   Object.defineProperty(globalThis, 'window', {
     configurable: true,
-    value: { __TAURI_INTERNALS__: { invoke } },
+    value: { __TAURI_INTERNALS__: { invoke, metadata: { currentWindow: { label: 'main' } } } },
   })
 }
 

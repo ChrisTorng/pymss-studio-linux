@@ -32,8 +32,7 @@ router.beforeEach(createWorkflowEditorRouteGuard({
     const result = await invoke(command, args)
     const workflow = useWorkflowStore()
     const id = args.payload.newWorkflow ? '__new__' : args.payload.workflowId
-    if (command === 'open_workflow_simple_editor_window') workflow.markSimpleEditorOpen(id)
-    else workflow.markNodeEditorOpen(id)
+    workflow.recordEditorOpened(result, command === 'open_workflow_simple_editor_window' ? 'simple' : 'advanced', id)
     return result
   },
   onError: error => useToastStore().error(error instanceof Error ? error.message : i18n.global.t('workflows.editorWindowOpenFailed')),

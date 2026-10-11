@@ -7,6 +7,8 @@ import { initTheme } from './utils/theme'
 import { connectWorkerEvents } from './utils/events'
 import { isMainTaskOwner } from './utils/taskOwner'
 import { initializeWorkbenchBridge } from './utils/workbenchBridge'
+import { isTauriRuntime } from './utils/appStore'
+import { listenForEditorExportPreferences } from './utils/editorExportPreferences'
 import { useSettingsStore } from '@/stores/settings'
 import { useAppStore, type RuntimeBackend } from '@/stores/app'
 import { useUpdateStore } from '@/stores/update'
@@ -36,6 +38,14 @@ async function bootstrap() {
   await settings.initialize().catch((error) => {
     console.warn('Failed to initialize settings', error)
   })
+  if (isTauriRuntime() && isMainTaskOwner()) {
+    try {
+      const unlisten = await listenForEditorExportPreferences(settings.saveEditorExportPreference)
+      app.onUnmount(unlisten)
+    } catch (error) {
+      console.warn('Failed to connect editor export preferences', error)
+    }
+  }
   await updates.initialize().catch((error) => {
     console.warn('Failed to initialize update store', error)
   })

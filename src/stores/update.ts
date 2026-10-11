@@ -6,6 +6,7 @@ import { exit } from '@tauri-apps/plugin-process'
 import { useAppStore } from '@/stores/app'
 import { useSettingsStore } from '@/stores/settings'
 import { isTauriRuntime, loadAppStore, saveAppStore } from '@/utils/appStore'
+import { isMainTaskOwner } from '@/utils/taskOwner'
 
 export type UpdateStatus = 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'installing' | 'failed'
 
@@ -98,6 +99,7 @@ export const useUpdateStore = defineStore('update', () => {
   ))
 
   async function persistState() {
+    if (!isMainTaskOwner()) return
     const payload: UpdateStorePayload = {
       deferredVersion: deferredVersion.value || undefined,
       deferredAt: deferredAt.value || undefined,

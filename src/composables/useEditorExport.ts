@@ -19,6 +19,7 @@ type UseEditorExportOptions = {
 
 export function useEditorExport(options: UseEditorExportOptions) {
   const { editor, settings, message, t } = options
+  let exportInFlight = false
 
   const showExportDialog = ref(false)
   const exportFormatDraft = ref<EditorExportFormat>('wav')
@@ -53,6 +54,7 @@ export function useEditorExport(options: UseEditorExportOptions) {
   }
 
   function openExportDialog() {
+    if (exportInFlight) return
     exportFormatDraft.value = editor.exportFormat
     exportWavBitDepthDraft.value = settings.wavBitDepth
     exportFlacBitDepthDraft.value = settings.flacBitDepth
@@ -113,25 +115,34 @@ export function useEditorExport(options: UseEditorExportOptions) {
   }
 
   async function exportMix() {
+    if (exportInFlight) return
+    exportInFlight = true
     try {
-      const peakProtection = exportFormatDraft.value !== 'wav'
-        || exportWavBitDepthDraft.value !== 'FLOAT'
+      const format = exportFormatDraft.value
+      const wavBitDepth = exportWavBitDepthDraft.value
+      const flacBitDepth = exportFlacBitDepthDraft.value
+      const peakProtection = format !== 'wav'
+        || wavBitDepth !== 'FLOAT'
         || exportPeakProtectionDraft.value
       const result = await editor.exportMix({
-        format: exportFormatDraft.value,
+        format,
         exportDir: exportDirDraft.value.trim() || undefined,
         fileName: exportFileNameDraft.value.trim() || undefined,
         audioParams: {
-          wavBitDepth: exportWavBitDepthDraft.value,
-          flacBitDepth: exportFlacBitDepthDraft.value,
+          wavBitDepth,
+          flacBitDepth,
           sampleRate: exportSampleRateDraft.value,
           peakProtection,
         },
       })
-      editor.exportFormat = exportFormatDraft.value
-      settings.wavBitDepth = exportWavBitDepthDraft.value
-      settings.flacBitDepth = exportFlacBitDepthDraft.value
+      editor.exportFormat = format
       message.success(t('editor.exported', { path: result.path }))
+      try {
+        await settings.saveEditorExportPreference({ format, bitDepth: format === 'wav' ? wavBitDepth : flacBitDepth })
+      } catch (error) {
+        console.warn('Failed to save editor export preference', error)
+        message.warning(t('editor.exportPreferencesSaveFailed'))
+      }
       if (result.peakProtectionApplied && Number(result.peakAdjustmentDb) < 0) {
         message.info(t('editor.exportPeakAdjusted', {
           db: Math.abs(Number(result.peakAdjustmentDb)).toFixed(1),
@@ -146,6 +157,8 @@ export function useEditorExport(options: UseEditorExportOptions) {
     } catch (error) {
       if (error instanceof EditorExportCancelledError) message.info(t('editor.exportCancelled'))
       else message.error(editor.lastError || t('editor.exportFailed'))
+    } finally {
+      exportInFlight = false
     }
   }
 

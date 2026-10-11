@@ -74,6 +74,7 @@ function desktopStorage({ update = offeredUpdate, checkError, installError, load
   const commands = []
   globalThis.window = {
     __TAURI_INTERNALS__: {
+      metadata: { currentWindow: { label: 'main' } },
       transformCallback: () => 1,
       invoke: async (command, args) => {
         commands.push(command)

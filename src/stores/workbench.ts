@@ -23,10 +23,14 @@ export const useWorkbenchStore = defineStore('workbench', () => {
       delete sessions[from]
     }
   }
-  function applyRemoteState(state: WorkbenchState) {
+  function applyRemoteState(state: WorkbenchState, preserveInputs = false) {
     remoteJobs[state.workflowKey] = state.jobs
-    if (state.session) Object.assign(session(state.workflowKey), state.session)
     const target = session(state.workflowKey)
+    if (state.session) {
+      const { inputs, primaryInput } = target.bindings
+      Object.assign(target, state.session)
+      if (preserveInputs) target.bindings = { ...target.bindings, inputs, primaryInput }
+    }
     if (!target.selectedJobId && state.jobs.length) target.selectedJobId = state.jobs[0].id
   }
   return { sessions, remoteJobs, session, adopt, applyRemoteState }

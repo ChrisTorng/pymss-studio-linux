@@ -29,10 +29,7 @@ import {
   hydrateSimpleWorkflow,
   type SimpleWorkflowReasonCode,
 } from '@/utils/workflowSimple'
-import {
-  isWorkflowEditorSurfaceLocked,
-  isWorkflowLockedByNodeEditor,
-} from '@/utils/workflowEditorState'
+import { WorkflowEditorInUseError } from '@/utils/workflowEditorState'
 import { isGraphWorkflowDefinition, isSimpleWorkflowDefinition } from '@/workflows/formats'
 import { litegraphToComfy } from '@/litegraph/graphAdapter'
 import {
@@ -45,7 +42,7 @@ const message = useMessage()
 const dialog = useDialog()
 const workflow = useWorkflowStore()
 const model = useModelStore()
-const { workflows, selectedWorkflowId, selectedWorkflow, nodeEditorOpenWorkflowId, simpleEditorOpenWorkflowId } = storeToRefs(workflow)
+const { workflows, selectedWorkflowId, selectedWorkflow, simpleEditorOpenWorkflowId } = storeToRefs(workflow)
 const { downloadedModels } = storeToRefs(model)
 const editingId = ref('')
 const name = ref('')
@@ -174,11 +171,8 @@ function setWorkflowTypeFilter(value: WorkflowTypeFilter) {
   typeFilter.value = value
 }
 
-const isNodeEditorOpen = computed(() => (
-  isWorkflowEditorSurfaceLocked(nodeEditorOpenWorkflowId.value, selectedWorkflowId.value, nodeEditorOpenWorkflowId.value === '__new__')
-  || isWorkflowEditorSurfaceLocked(simpleEditorOpenWorkflowId.value, selectedWorkflowId.value, simpleEditorOpenWorkflowId.value === '__new__')
-))
-const isAnyEditorOpen = computed(() => Boolean(nodeEditorOpenWorkflowId.value || simpleEditorOpenWorkflowId.value))
+const isNodeEditorOpen = computed(() => Boolean(workflow.editorFor(selectedWorkflowId.value)))
+const isAnyEditorOpen = computed(() => workflow.hasAnyEditorOpen)
 
 function workflowDefinitionError(definition: Record<string, unknown>): string {
   const issue = getWorkflowDefinitionIssue(definition)
@@ -206,12 +200,11 @@ const workflowMenuOptions = computed<DropdownOption[]>(() => {
   const isSimpleDefinition = isSimpleWorkflowDefinition(current.definition)
   const canEditSimple = isSimpleDefinition && analyzeSimpleWorkflow(current.definition).editable
   const definitionError = workflowDefinitionError(current.definition)
-  const locked = isWorkflowLockedByNodeEditor(nodeEditorOpenWorkflowId.value, current.id)
-    || isWorkflowLockedByNodeEditor(simpleEditorOpenWorkflowId.value, current.id)
+  const locked = Boolean(workflow.editorFor(current.id))
   const options: DropdownOption[] = [
     {
       key: 'edit',
-      label: t('workbench.open'),
+      label: isSimpleDefinition ? t('workflows.simpleMode') : t('workflows.openAdvancedEditor'),
       disabled: locked || (isSimpleDefinition && !canEditSimple),
     },
   ]
@@ -333,7 +326,7 @@ async function flushWorkflowDefaultsQueue() {
       } catch (error) {
         pendingWorkflowDefaults.delete(workflowId)
         workflowDefaultsQueue.shift()
-        message.error(error instanceof Error ? error.message : String(error))
+        message.error(error instanceof WorkflowEditorInUseError ? t('workflows.editorInUseHint') : error instanceof Error ? error.message : String(error))
         continue
       }
       if (!pendingWorkflowDefaults.has(workflowId)) workflowDefaultsQueue.shift()
@@ -408,7 +401,7 @@ async function saveMeta() {
     if (error instanceof WorkflowRevisionConflictError && selectedWorkflowId.value === targetId) {
       syncWorkflowDetails(selectedWorkflow.value)
     }
-    message.error(error instanceof WorkflowRevisionConflictError
+    message.error(error instanceof WorkflowEditorInUseError ? t('workflows.editorInUseHint') : error instanceof WorkflowRevisionConflictError
       ? t('workflows.revisionConflictTitle')
       : error instanceof Error ? error.message : t('workflows.saveFailed'))
   }
@@ -417,15 +410,15 @@ async function saveMeta() {
 async function openEditorWindow(kind: 'simple' | 'node', workflowId: string, newWorkflow: boolean) {
   try {
     if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-      await invoke(`open_workflow_${kind}_editor_window`, { payload: { workflowId, newWorkflow } })
+      const result = await invoke(`open_workflow_${kind}_editor_window`, { payload: { workflowId, newWorkflow } })
+      workflow.recordEditorOpened(result, kind === 'node' ? 'advanced' : kind, newWorkflow ? '__new__' : workflowId)
     } else {
       const query = newWorkflow ? 'new=1' : `workflowId=${encodeURIComponent(workflowId)}`
       const popup = window.open(`#/workflow-${kind}-editor?${query}`, `workflow-${kind}-editor-${workflowId || 'new'}`, 'popup=yes,width=1440,height=900')
       if (!popup) throw new Error(t('workflows.editorWindowOpenFailed'))
       popup.focus()
     }
-    if (kind === 'simple') workflow.markSimpleEditorOpen(newWorkflow ? '__new__' : workflowId)
-    else workflow.markNodeEditorOpen(newWorkflow ? '__new__' : workflowId)
+    if (!(typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window)) workflow.recordEditorOpened(null, kind === 'node' ? 'advanced' : kind, newWorkflow ? '__new__' : workflowId)
   } catch (error) {
     message.error(error instanceof Error ? error.message : t('workflows.editorWindowOpenFailed'))
   }
@@ -508,12 +501,10 @@ function openWorkflowEditor(item: WorkflowEntry) {
 }
 
 function reopenActiveEditor() {
-  if (simpleEditorOpenWorkflowId.value) {
-    if (simpleEditorOpenWorkflowId.value === '__new__') void openSimpleEditor({ forceNew: true })
-    else void openSimpleEditor({ workflowId: simpleEditorOpenWorkflowId.value })
-    return
-  }
-  void openNodeEditor()
+  const editor = workflow.editorFor(selectedWorkflowId.value) || workflow.openedEditors.at(-1)
+  if (!editor) return
+  if (editor.kind === 'simple') void openSimpleEditor({ workflowId: editor.workflowId, forceNew: !editor.workflowId })
+  else void openNodeEditor({ workflowId: editor.workflowId, forceNew: !editor.workflowId })
 }
 
 function handleWorkflowContextMenuSelect(key: string | number) {
@@ -616,7 +607,7 @@ function deleteWorkflow(item: WorkflowEntry) {
         if (simpleEditorOpenWorkflowId.value === deletedId) workflow.markSimpleEditorClosed()
         message.success(t('workflows.deleted'))
       } catch (error) {
-        message.error(error instanceof WorkflowRevisionConflictError
+        message.error(error instanceof WorkflowEditorInUseError ? t('workflows.editorInUseHint') : error instanceof WorkflowRevisionConflictError
           ? t('workflows.revisionConflictTitle')
           : error instanceof Error ? error.message : t('workflows.saveFailed'))
       }
@@ -1015,9 +1006,9 @@ watch([workflows, selectedWorkflowId], () => {
 
           <footer class="wf-actionbar">
             <div class="wf-actionbar__primary">
-              <n-button type="primary" size="large" @click="openWorkflowEditor(selectedWorkflow)">
-                <template #icon><n-icon :component="GitNetworkOutline" /></template>
-                {{ t('workbench.open') }}
+              <n-button v-if="selectedSimpleAnalysis?.editable || isComfyWorkflow" type="primary" size="large" @click="openWorkflowEditor(selectedWorkflow)">
+                <template #icon><n-icon :component="selectedSimpleAnalysis?.editable ? ListOutline : GitNetworkOutline" /></template>
+                {{ selectedSimpleAnalysis?.editable ? t('workflows.editSimpleAction') : t('workflows.editAdvancedAction') }}
               </n-button>
             </div>
             <div class="wf-actionbar__more">

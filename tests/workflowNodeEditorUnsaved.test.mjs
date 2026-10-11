@@ -22,6 +22,8 @@ const names = new Set([
   'closeEditor',
   'destroyWindow',
   'saveAndClose',
+  'runPromise',
+  'runWorkflow',
 ])
 const selected = script.statements.filter(statement => (
   ts.isFunctionDeclaration(statement) ? names.has(statement.name?.text)
@@ -66,9 +68,10 @@ function createContext() {
     router: { push: async target => navigation.push(target) },
     message: { warning: value => warnings.push(value) },
     save: async () => saveResult,
+    workbench: { run: async () => {} },
   }
   const result = vm.runInNewContext(
-    `${code}\n({ dirty, captureInitialSnapshot, closeEditor, saveAndClose })`,
+    `${code}\n({ dirty, captureInitialSnapshot, closeEditor, saveAndClose, runWorkflow })`,
     context,
   )
   return {
@@ -124,5 +127,23 @@ test('advanced editor closes only after a successful save and keeps invalid draf
   state.context.formError.value = ''
   state.setSaveResult(true)
   await state.result.saveAndClose()
+  assert.deepEqual(state.navigation, ['/workflows'])
+})
+
+test('closing an advanced editor waits for submission to finish and does not submit twice', async () => {
+  const state = createContext()
+  state.result.captureInitialSnapshot()
+  let finish
+  const pending = new Promise(resolve => { finish = resolve })
+  let submissions = 0
+  state.context.workbench.run = () => { submissions++; return pending }
+  const first = state.result.runWorkflow()
+  const second = state.result.runWorkflow()
+  const closing = state.result.closeEditor()
+  await Promise.resolve()
+  assert.equal(submissions, 1)
+  assert.deepEqual(state.navigation, [])
+  finish()
+  await Promise.all([first, second, closing])
   assert.deepEqual(state.navigation, ['/workflows'])
 })

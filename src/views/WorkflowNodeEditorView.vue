@@ -7,7 +7,8 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
 import { storeToRefs } from 'pinia'
 import WorkflowRunPanel from '@/components/workflow/WorkflowRunPanel.vue'
-import WorkflowNodeBindings from '@/components/workflow/WorkflowNodeBindings.vue'
+import WorkflowExecutionProgress from '@/components/workflow/WorkflowExecutionProgress.vue'
+import { WorkflowEditorInUseError } from '@/utils/workflowEditorState'
 import { useWorkflowWorkbench } from '@/composables/useWorkflowWorkbench'
 import { cloneWorkflow } from '@/workflows/workbench'
 import WorkflowNodeEditor from '@/components/workflow/WorkflowNodeEditorLite.vue'
@@ -113,7 +114,7 @@ const missingModelNodes = computed(() => {
   }
   return missing
 })
-const canSave = computed(() => Boolean(name.value.trim()) && !saving.value)
+const canSave = computed(() => !formError.value && !saving.value)
 
 function snapshot() {
   return JSON.stringify({
@@ -130,17 +131,18 @@ const dirty = computed(() => loaded.value
   && snapshot() !== initialSnapshot.value)
 
 const workflowKey = computed(() => editingId.value || 'new-graph')
-const currentDefinition = computed(() => definition.value)
 const workbench = useWorkflowWorkbench({ workflowKey, definition: () => definition.value, save: () => save() })
-const { viewMode, selectedJobId, executionDefinition, executionNodeSummaries, nodeStates, nodeSummaries, submitting } = workbench
+const { selectedJobId, liveNodeStates, liveNodeLogs, executionMatchesDraft, submitting } = workbench
+let runPromise: Promise<void> | null = null
 async function runWorkflow() {
+  if (runPromise) return runPromise
   syncCurrentDefinition()
-  await workbench.run()
+  const operation = workbench.run()
+  runPromise = operation
+  try { await operation }
+  finally { if (runPromise === operation) runPromise = null }
 }
-const executionGraph = computed(() => cloneWorkflow(executionDefinition.value || {}))
-const bindingNode = ref('')
-const bindingAction = ref('')
-function openRuntimeNode(binding: { id: string; action: string }) { bindingAction.value = binding.action; bindingNode.value = binding.id }
+const canRun = computed(() => !formError.value && !saving.value)
 let confirmedClose = false
 onBeforeRouteLeave(() => confirmedClose || !dirty.value || window.confirm(t('workflows.simpleUnsavedHint')))
 
@@ -235,6 +237,7 @@ async function persistDefinition(
     message.success(t('workflows.saved'))
     return entry
   } catch (error) {
+    if (error instanceof WorkflowEditorInUseError) { message.error(t('workflows.editorInUseHint')); return null }
     if (error instanceof WorkflowRevisionConflictError) {
       pendingDefinition.value = definitionToSave
       showRevisionConflict.value = true
@@ -248,7 +251,7 @@ async function persistDefinition(
   }
 }
 
-async function save(currentDefinition?: Record<string, unknown>) {
+async function save(currentDefinition?: Record<string, unknown>, options: { force?: boolean; saveCopy?: boolean } = {}) {
   if (currentDefinition && typeof currentDefinition === 'object') definition.value = currentDefinition
   else syncCurrentDefinition()
   if (!canSave.value) return null
@@ -257,7 +260,7 @@ async function save(currentDefinition?: Record<string, unknown>) {
     outputFormat: defaultFormat.value,
   })
   definition.value = definitionToSave
-  return persistDefinition(definitionToSave)
+  return persistDefinition(definitionToSave, options)
 }
 
 async function reloadRevisionConflict() {
@@ -276,14 +279,15 @@ async function reloadRevisionConflict() {
 }
 
 function saveRevisionConflictCopy() {
-  if (pendingDefinition.value) void persistDefinition(pendingDefinition.value, { saveCopy: true })
+  if (pendingDefinition.value) void save(undefined, { saveCopy: true })
 }
 
 function overwriteRevisionConflict() {
-  if (pendingDefinition.value) void persistDefinition(pendingDefinition.value, { force: true })
+  if (pendingDefinition.value) void save(undefined, { force: true })
 }
 
 async function closeEditor() {
+  if (runPromise) await runPromise
   syncCurrentDefinition()
   if (dirty.value) {
     showClosePrompt.value = true
@@ -306,6 +310,7 @@ async function destroyWindow() {
 }
 
 async function saveAndClose() {
+  if (runPromise) await runPromise
   if (saving.value) return
   syncCurrentDefinition()
   if (formError.value) {
@@ -394,7 +399,13 @@ onMounted(async () => {
   const workflowId = String(route.query.workflowId || '')
   const isNewWorkflow = route.query.new === '1'
   const target = workflowId ? workflows.value.find(item => item.id === workflowId) : null
-  loadWorkflow(isNewWorkflow ? null : target || workflows.value.find(item => item.id === workflow.selectedWorkflowId) || workflows.value[0] || null)
+  if (!isNewWorkflow && workflowId && !target) {
+    loadWorkflow(null)
+    editingId.value = workflowId
+    formatError.value = t('workflows.workflowNotFound')
+  } else {
+    loadWorkflow(isNewWorkflow ? null : target || workflows.value.find(item => item.id === workflow.selectedWorkflowId) || workflows.value[0] || null)
+  }
   captureInitialSnapshot()
   loaded.value = true
   await refreshMaximized()
@@ -463,7 +474,6 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="config-grid">
-        <n-button v-if="!isStandaloneWindow" size="small" @click="closeEditor">{{ t('workflows.returnToWorkflows') }}</n-button>
         <label class="config-field">
           <span>{{ t('workflows.defaultDevice') }}</span>
           <n-select v-model:value="defaultDevice" size="small" :options="deviceOptions" />
@@ -482,23 +492,22 @@ onBeforeUnmount(() => {
       <n-button type="primary" @click="closeEditor">{{ t('common.close') }}</n-button>
     </div>
 
-    <template v-if="loaded && !formatError">
-      <WorkflowRunPanel :workflow-key="workflowKey" :definition="currentDefinition" v-model:view-mode="viewMode" v-model:job-id="selectedJobId" :submitting="submitting" :dirty="dirty" @run="runWorkflow" @cancel="workbench.cancel" />
-      <WorkflowNodeEditor v-if="viewMode === 'execution' && executionDefinition"
-        :key="'execution-' + selectedJobId" :definition="executionGraph" :model-options="modelOptions" :models="models"
-        :readonly="true" :runtime-controls="true" :node-summaries="executionNodeSummaries" :node-states="nodeStates" />
-      <WorkflowNodeEditor v-else ref="editorRef" :key="editorKey" v-model:definition="definition"
-        :runtime-controls="true" :node-summaries="nodeSummaries" :model-options="modelOptions" :models="models" :default-device="defaultDevice" :default-format="defaultFormat"
-        :form-error="formError" :can-save="canSave"
-        :advisory="missingModelNodes.length ? t('workflows.stepModelNotDownloaded', { id: missingModelNodes.join(', ') }) : ''"
-        @save="save" @run="runWorkflow" @runtime-node="openRuntimeNode"
-        @close="closeEditor" @initialized="initializeEditorBaseline" @defaults-restored="restoreDefaultControls" />
-      <n-drawer :show="Boolean(bindingNode)" :width="360" @update:show="(show: boolean) => { if (!show) bindingNode = '' }">
-        <n-drawer-content :title="t('workbench.runtimeBinding')" closable>
-          <WorkflowNodeBindings :workflow-key="workflowKey" :definition="currentDefinition" :node-id="bindingNode" :action="bindingAction" />
-        </n-drawer-content>
-      </n-drawer>
-    </template>
+    <WorkflowNodeEditor v-else-if="loaded" ref="editorRef" :key="editorKey" v-model:definition="definition"
+      :node-states="liveNodeStates" :node-logs="liveNodeLogs" :execution-visible="executionMatchesDraft"
+      :model-options="modelOptions" :models="models" :default-device="defaultDevice" :default-format="defaultFormat"
+      :form-error="formError" :can-save="canSave && !submitting"
+      :advisory="missingModelNodes.length ? t('workflows.stepModelNotDownloaded', { id: missingModelNodes.join(', ') }) : ''"
+      @save="save" @run="runWorkflow"
+      @close="closeEditor" @initialized="initializeEditorBaseline" @defaults-restored="restoreDefaultControls">
+      <template #execution-progress><WorkflowExecutionProgress :job="workbench.focusedJob.value" :task="workbench.focusedTask.value" /></template>
+      <template #run-controls>
+        <WorkflowRunPanel :workflow-key="workflowKey" v-model:job-id="selectedJobId" size="small"
+          :submitting="submitting" :can-run="canRun"
+          @run="runWorkflow" @cancel="workbench.cancel">
+
+        </WorkflowRunPanel>
+      </template>
+    </WorkflowNodeEditor>
     <n-modal v-model:show="showClosePrompt" preset="card" :title="t('workflows.simpleUnsavedTitle')" style="width: min(440px, calc(100vw - 32px))">
       <p>{{ t('workflows.simpleUnsavedHint') }}</p>
       <template #footer>
@@ -520,14 +529,12 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.workflow-node-editor-page > .litegraph-editor { flex: 1; min-height: 0; }
-
 .workflow-node-editor-page {
   height: 100%;
   min-height: 0;
   padding: 0 12px 12px;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 10px;
   -webkit-app-region: no-drag;
 }
@@ -680,7 +687,7 @@ onBeforeUnmount(() => {
 
 .config-grid {
   display: grid;
-  grid-template-columns: auto minmax(132px, 156px) minmax(132px, 156px);
+  grid-template-columns: minmax(132px, 156px) minmax(132px, 156px);
   gap: 8px;
   align-items: end;
 }

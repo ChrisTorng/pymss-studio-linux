@@ -12,6 +12,7 @@ use crate::session_log::{self, DebugLogContent, DebugLogInfo, DebugLogReport};
 use crate::state::{AppState, ProxySettings};
 use crate::storage;
 use crate::update_manager;
+use crate::workflow_editors::{self, RegistrySnapshot, WorkflowEditorKind, WorkflowEditors};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -903,6 +904,9 @@ pub async fn load_app_store(app: AppHandle, name: String) -> AppResult<Value> {
 
 #[tauri::command]
 pub async fn save_app_store(app: AppHandle, name: String, data: Value) -> AppResult<()> {
+    if name == "workflow-state" {
+        return Err(AppError::Worker("workflow-state requires mutate_workflow_store".into()));
+    }
     session_log::append(
         &app,
         "DEBUG",
@@ -919,7 +923,12 @@ pub async fn save_app_store(app: AppHandle, name: String, data: Value) -> AppRes
 }
 
 #[tauri::command]
-pub async fn mutate_workflow_store(app: AppHandle, payload: Value) -> AppResult<Value> {
+pub async fn mutate_workflow_store(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    editors: State<'_, WorkflowEditors>,
+    payload: Value,
+) -> AppResult<Value> {
     session_log::append(
         &app,
         "DEBUG",
@@ -933,7 +942,25 @@ pub async fn mutate_workflow_store(app: AppHandle, payload: Value) -> AppResult<
                 .to_string(),
         )],
     );
-    storage::mutate_workflow_store(&app, &payload)
+    // Ownership validation, persistence, and first-save identity adoption are
+    // one operation. Opening a second editor cannot slip between those steps.
+    let (mut response, changed, snapshot) = {
+        let mut registry = editors.registry();
+        let (response, changed) = registry.mutate(window.label(), &payload, || {
+            storage::mutate_workflow_store(&app, &payload)
+        })?;
+        (response, changed, registry.snapshot())
+    };
+    response["editorSnapshot"] = serde_json::to_value(&snapshot)?;
+    if let Some(snapshot) = changed {
+        workflow_editors::emit_snapshot(&app, &snapshot);
+    }
+    Ok(response)
+}
+
+#[tauri::command]
+pub fn get_workflow_editors(editors: State<'_, WorkflowEditors>) -> RegistrySnapshot {
+    editors.registry().snapshot()
 }
 
 fn value_type(value: &Value) -> &'static str {
@@ -970,8 +997,19 @@ fn safe_file_name(value: &str) -> String {
     }
 }
 
+fn validate_editor_project_id(project_id: &str) -> AppResult<&str> {
+    if project_id.is_empty()
+        || matches!(project_id, "." | "..")
+        || project_id.ends_with('.')
+        || safe_file_name(project_id) != project_id
+    {
+        return Err(AppError::Worker("invalid editor project id".into()));
+    }
+    Ok(project_id)
+}
+
 fn editor_project_dir(app: &AppHandle, project_id: &str) -> AppResult<PathBuf> {
-    Ok(editor_projects_root(app)?.join(safe_file_name(project_id)))
+    Ok(editor_projects_root(app)?.join(validate_editor_project_id(project_id)?))
 }
 
 fn editor_project_id_for_task_id(task_id: &str) -> String {
@@ -1297,25 +1335,9 @@ fn write_editor_project(app: &AppHandle, project: &Value) -> AppResult<Value> {
 
 #[tauri::command]
 pub async fn close_current_window(window: tauri::WebviewWindow) -> AppResult<()> {
-    let label = window.label().to_string();
-    let app_handle = window.app_handle().clone();
     window
         .destroy()
-        .map_err(|error| AppError::Worker(error.to_string()))?;
-    if label.starts_with("workflow-node-editor") {
-        let _ = app_handle.emit_to(
-            "main",
-            "pymss://workflow-node-editor-closed",
-            serde_json::json!({ "label": label }),
-        );
-    } else if label.starts_with("workflow-simple-editor") {
-        let _ = app_handle.emit_to(
-            "main",
-            "pymss://workflow-simple-editor-closed",
-            serde_json::json!({ "label": label }),
-        );
-    }
-    Ok(())
+        .map_err(|error| AppError::Worker(error.to_string()))
 }
 
 #[tauri::command]
@@ -1358,93 +1380,126 @@ pub async fn start_drag_current_window(window: tauri::WebviewWindow) -> AppResul
 }
 
 #[tauri::command]
-pub async fn open_workflow_node_editor_window(app: AppHandle, payload: Value) -> AppResult<Value> {
-    let workflow_id = payload
-        .get("workflowId")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
-    let new_workflow = payload
-        .get("newWorkflow")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let label = if workflow_id.trim().is_empty() {
-        "workflow-node-editor-new".to_string()
-    } else {
-        format!("workflow-node-editor-{}", safe_file_name(&workflow_id))
-    };
-    if let Some(window) = app.get_webview_window(&label) {
-        let _ = window.set_focus();
-        return Ok(
-            serde_json::json!({ "workflowId": workflow_id, "label": label, "opened": true, "reused": true }),
-        );
-    }
-
-    let url = if workflow_id.trim().is_empty() {
-        if new_workflow {
-            "index.html#/workflow-node-editor?new=1".to_string()
-        } else {
-            "index.html#/workflow-node-editor".to_string()
-        }
-    } else {
-        format!("index.html#/workflow-node-editor?workflowId={}", workflow_id)
-    };
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
-        .title("Pymss Studio Workflow Node Editor")
-        .inner_size(1440.0, 900.0)
-        .min_inner_size(1180.0, 720.0)
-        .resizable(true)
-        .minimizable(true)
-        .maximizable(true)
-        .closable(true)
-        .decorations(cfg!(target_os = "macos"))
-        .visible(false)
-        .focused(true)
-        .on_page_load(|window, payload| {
-            if payload.event() == PageLoadEvent::Finished {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        })
-        .build()
-        .map_err(|error| AppError::Worker(error.to_string()))?;
-    Ok(
-        serde_json::json!({ "workflowId": workflow_id, "label": label, "opened": true, "reused": false }),
-    )
+pub async fn open_workflow_node_editor_window(
+    app: AppHandle,
+    editors: State<'_, WorkflowEditors>,
+    payload: Value,
+) -> AppResult<Value> {
+    open_workflow_editor_window(app, editors, payload, WorkflowEditorKind::Advanced).await
 }
 
 #[tauri::command]
-pub async fn open_workflow_simple_editor_window(app: AppHandle, payload: Value) -> AppResult<Value> {
+pub async fn open_workflow_simple_editor_window(
+    app: AppHandle,
+    editors: State<'_, WorkflowEditors>,
+    payload: Value,
+) -> AppResult<Value> {
+    open_workflow_editor_window(app, editors, payload, WorkflowEditorKind::Simple).await
+}
+
+async fn open_workflow_editor_window(
+    app: AppHandle,
+    editors: State<'_, WorkflowEditors>,
+    payload: Value,
+    kind: WorkflowEditorKind,
+) -> AppResult<Value> {
+    let _creation_guard = editors.creation_gate.lock().await;
     let workflow_id = payload
         .get("workflowId")
         .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
         .unwrap_or("")
         .to_string();
     let new_workflow = payload
         .get("newWorkflow")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let label = if workflow_id.trim().is_empty() {
-        "workflow-simple-editor-new".to_string()
-    } else {
-        format!("workflow-simple-editor-{}", safe_file_name(&workflow_id))
+
+    let (prefix, route, title) = match kind {
+        WorkflowEditorKind::Simple => (
+            "workflow-simple-editor",
+            "workflow-simple-editor",
+            "Pymss Studio Simple Workflow Editor",
+        ),
+        WorkflowEditorKind::Advanced => (
+            "workflow-node-editor",
+            "workflow-node-editor",
+            "Pymss Studio Workflow Node Editor",
+        ),
     };
-    if let Some(window) = app.get_webview_window(&label) {
-        let _ = window.set_focus();
-        return Ok(serde_json::json!({ "workflowId": workflow_id, "label": label, "opened": true, "reused": true }));
-    }
-    let url = if workflow_id.trim().is_empty() {
+    let base_label = if workflow_id.is_empty() {
+        format!("{prefix}-new")
+    } else {
+        format!("{prefix}-{}", safe_file_name(&workflow_id))
+    };
+    // Window labels remain fixed after saving a new workflow or a copy. An
+    // occupied old label must not cause a different workflow to be reused.
+    let (label, snapshot) = loop {
+        let existing = editors.registry().editor_for_request(&workflow_id, kind);
+        if let Some(existing) = existing {
+            if let Some(window) = app.get_webview_window(&existing.label) {
+                let snapshot = {
+                    let registry = editors.registry();
+                    if registry.editor_for_request(&workflow_id, kind).as_ref() != Some(&existing) {
+                        continue;
+                    }
+                    registry.snapshot()
+                };
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+                return Ok(serde_json::json!({
+                    "workflowId": existing.workflow_id,
+                    "label": existing.label,
+                    "kind": existing.kind,
+                    "opened": true,
+                    "reused": true,
+                    "editorSnapshot": snapshot,
+                }));
+            }
+            let changed = editors.registry().release(&existing.label);
+            if let Some(snapshot) = changed {
+                workflow_editors::emit_snapshot(&app, &snapshot);
+            }
+            continue;
+        }
+
+        let mut sequence = 0u64;
+        let label = loop {
+            let base = if sequence == 0 {
+                base_label.clone()
+            } else {
+                format!("{base_label}-{sequence}")
+            };
+            let candidate = editors.registry().next_available_label(&base);
+            if app.get_webview_window(&candidate).is_none() {
+                break candidate;
+            }
+            sequence += 1;
+        };
+        let snapshot = {
+            let mut registry = editors.registry();
+            // A first save can adopt this ID after our initial lookup.
+            if registry.editor_for_request(&workflow_id, kind).is_some() {
+                continue;
+            }
+            registry.reserve(&label, &workflow_id, kind)?
+        };
+        break (label, snapshot);
+    };
+    workflow_editors::emit_snapshot(&app, &snapshot);
+
+    let url = if workflow_id.is_empty() {
         if new_workflow {
-            "index.html#/workflow-simple-editor?new=1".to_string()
+            format!("index.html#/{route}?new=1")
         } else {
-            "index.html#/workflow-simple-editor".to_string()
+            format!("index.html#/{route}")
         }
     } else {
         let encoded_id: String = url::form_urlencoded::byte_serialize(workflow_id.as_bytes()).collect();
-        format!("index.html#/workflow-simple-editor?workflowId={}", encoded_id)
+        format!("index.html#/{route}?workflowId={encoded_id}")
     };
-    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
-        .title("Pymss Studio Simple Workflow Editor")
+    let result = WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        .title(title)
         .inner_size(1440.0, 900.0)
         .min_inner_size(1180.0, 720.0)
         .resizable(true)
@@ -1460,34 +1515,56 @@ pub async fn open_workflow_simple_editor_window(app: AppHandle, payload: Value) 
                 let _ = window.set_focus();
             }
         })
-        .build()
-        .map_err(|error| AppError::Worker(error.to_string()))?;
-    Ok(serde_json::json!({ "workflowId": workflow_id, "label": label, "opened": true, "reused": false }))
+        .build();
+    if let Err(error) = result {
+        let changed = editors.registry().release(&label);
+        if let Some(snapshot) = changed {
+            workflow_editors::emit_snapshot(&app, &snapshot);
+        }
+        return Err(AppError::Worker(error.to_string()));
+    }
+    // The page may have acquired a formal ID or already closed while build()
+    // returned. Read its current ownership; do not restore the initial entry.
+    let snapshot = editors.registry().snapshot();
+    let current_workflow_id = snapshot.editors.iter()
+        .find(|editor| editor.label == label)
+        .map(|editor| editor.workflow_id.as_str())
+        .unwrap_or(&workflow_id);
+    Ok(serde_json::json!({
+        "workflowId": current_workflow_id,
+        "label": label,
+        "kind": kind,
+        "opened": true,
+        "reused": false,
+        "editorSnapshot": snapshot,
+    }))
 }
 
 #[tauri::command]
-pub async fn open_editor_window(app: AppHandle, payload: Value) -> AppResult<Value> {
+pub async fn open_editor_window(
+    app: AppHandle,
+    editors: State<'_, WorkflowEditors>,
+    payload: Value,
+) -> AppResult<Value> {
     let project_id = payload
         .get("projectId")
         .and_then(Value::as_str)
         .ok_or_else(|| AppError::Worker("missing projectId".into()))?
         .to_string();
-    let label = format!("editor-{}", safe_file_name(&project_id));
+    validate_editor_project_id(&project_id)?;
+    let _creation_guard = editors.creation_gate.lock().await;
+    let label = format!("editor-{project_id}");
     if let Some(window) = app.get_webview_window(&label) {
-        let _ = window.emit(
-            "pymss://editor-open-project",
-            serde_json::json!({ "projectId": project_id, "label": label }),
-        );
+        let _ = window.unminimize();
         let _ = window.set_focus();
         return Ok(
             serde_json::json!({ "projectId": project_id, "label": label, "opened": true, "reused": true }),
         );
     }
 
-    let url = format!(
-        "index.html#/editor?projectId={}&windowLabel={}",
-        project_id, label
-    );
+    let encoded_id: String = url::form_urlencoded::byte_serialize(project_id.as_bytes()).collect();
+    let encoded_label: String = url::form_urlencoded::byte_serialize(label.as_bytes()).collect();
+    let url = format!("index.html#/editor?projectId={encoded_id}&windowLabel={encoded_label}");
     WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
         .title("Pymss Studio Editor")
         .inner_size(1440.0, 900.0)
@@ -3106,6 +3183,34 @@ mod tests {
             .expect("system time should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("pymss-studio-{name}-{unique}"))
+    }
+
+    #[test]
+    fn editor_project_id_validation_preserves_normal_project_identity() {
+        for project_id in [
+            "edit_task_1720000000000_abc12",
+            "edit_blank_1720000000000",
+            "project-with.dots",
+        ] {
+            assert_eq!(validate_editor_project_id(project_id).unwrap(), project_id);
+        }
+        let longest_id = "a".repeat(96);
+        assert_eq!(validate_editor_project_id(&longest_id).unwrap(), longest_id);
+    }
+
+    #[test]
+    fn editor_project_id_validation_rejects_path_and_label_aliases() {
+        for project_id in [
+            "", " ", ".", "..", "../project", "project/name", "project\\name",
+            "project:name", "project?name", "project.", "_project", "project_", "目录",
+        ] {
+            assert!(validate_editor_project_id(project_id).is_err(), "accepted {project_id}");
+        }
+        let long_a = format!("{}a", "x".repeat(96));
+        let long_b = format!("{}b", "x".repeat(96));
+        assert_eq!(safe_file_name(&long_a), safe_file_name(&long_b));
+        assert!(validate_editor_project_id(&long_a).is_err());
+        assert!(validate_editor_project_id(&long_b).is_err());
     }
 
     #[test]

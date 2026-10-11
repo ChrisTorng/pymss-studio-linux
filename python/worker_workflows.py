@@ -193,9 +193,11 @@ def _apply_runtime_device(dag: Any, payload: dict[str, Any], *, simple: bool) ->
         widgets[ids_index] = ",".join(str(index) for index in ids)
 
 
-def _emit_progress(task_id: str) -> Any:
+def _emit_progress(task_id: str, log_scope: Any = None) -> Any:
     """Forward native overall progress and display only audio-second counters."""
     def cb(event: dict[str, Any]) -> None:
+        if log_scope is not None:
+            log_scope.track(event)
         fraction = float(event.get("overall_fraction") or 0)
         if not math.isfinite(fraction):
             fraction = 0
@@ -1234,12 +1236,16 @@ def _run_pymss(payload: dict[str, Any], task_id: str, input_path: str | None,
             graph_output_dir = Path(cleanup.enter_context(tempfile.TemporaryDirectory(
                 prefix=".pymss-ensemble-", dir=task_output_dir,
             )))
+        from worker_workflow_logs import workflow_logging
+
+        log_scope = cleanup.enter_context(workflow_logging(task_id))
         saved = graph.run_dag(
             dag,
             output_dir=graph_output_dir,
             input_path=input_path,
             inputs=runtime_inputs or None,
-            progress_event_callback=_emit_progress(task_id),
+            progress_event_callback=_emit_progress(task_id, log_scope),
+            logger=log_scope.logger,
             device=_resolve_device(payload),
             model_dir=payload.get("modelDir") or None,
             download=bool(payload.get("downloadMethod") and payload.get("downloadMethod") != "never"),

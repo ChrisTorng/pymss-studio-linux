@@ -1,15 +1,17 @@
 import { detectWorkflowFormat, isWorkflowSaveNodeType } from './formats.ts'
 
-export type WorkflowNodeState = { status: 'running' | 'done' | 'failed' | 'cancelled'; progress: number }
+export type WorkflowNodeState = { status: 'running' | 'done' | 'failed' | 'cancelled'; progress: number; message?: string }
 export type WorkflowRuntimeBindings = {
   inputs: Record<string, { files: string[]; folder?: string }>
   outputs: Record<string, string>
+  outputDirectory?: string
   primaryInput: string
   outputLayout: 'flat' | 'folders'
 }
 export type WorkflowBindingNode = { id: string; label: string; embeddedPath?: string; subdirectory?: string }
 export type WorkflowWorkbenchSnapshot = {
   version: 1
+  nativeGraph?: true
   sourceUpdatedAt: number
   sourceDefinition: Record<string, unknown>
   bindings: WorkflowRuntimeBindings
@@ -79,11 +81,15 @@ export function workbenchOutputDirectory(node: WorkflowBindingNode, override: st
   return node.subdirectory ? appendDirectory(root, node.subdirectory) : root
 }
 
-/** Build a transient graph and explicit per-file inputs without changing the saved document. */
+/** Expand simple workflow bindings per file; execute native graphs unchanged once. */
 export function prepareWorkbenchRun(
   definition: Record<string, unknown>, bindings: WorkflowRuntimeBindings, defaultDirectory: string,
 ): { definition: Record<string, unknown>; runs: WorkbenchRun[] } {
   const transient = cloneWorkflow(definition)
+  if (detectWorkflowFormat(transient) === 'graph') {
+    if (!defaultDirectory.trim()) throw new Error('workbench.missingOutputDirectory')
+    return { definition: transient, runs: [{ input: '', inputs: {}, outputs: {} }] }
+  }
   const inputNodes = workflowInputNodes(transient)
   const outputNodes = workflowOutputNodes(transient)
   if (!outputNodes.length) throw new Error('workbench.noOutputs')
@@ -92,43 +98,22 @@ export function prepareWorkbenchRun(
   ].filter(Boolean)]))
   if (inputNodes.some(node => !filesByNode.get(node.id)?.length)) throw new Error('workbench.missingInput')
   const primary = inputNodes.find(node => node.id === bindings.primaryInput) || inputNodes[0]
-  const shared = (Array.isArray(transient.nodes) ? transient.nodes : []).filter(record).filter(node => node.type === 'input_audio')
-  if (shared.length > 1 || (shared.length && String(shared[0].id) !== primary?.id)) throw new Error('workbench.primaryNativeInput')
   const multiple = inputNodes.filter(node => (filesByNode.get(node.id)?.length || 0) > 1)
   if (multiple.length > 1) throw new Error('workbench.multipleBatches')
   if (multiple.length && multiple[0].id !== primary?.id) throw new Error('workbench.primaryBatch')
-  const slotNames = new Map<string, string>()
-  if (detectWorkflowFormat(transient) === 'graph') {
-    const nodes = (transient.nodes as Record<string, any>[])
-    for (const node of nodes.filter(node => LOAD_TYPES.has(String(node.type)))) {
-      const id = String(node.id)
-      if (node.type === 'input_audio') continue
-      const widgets = Array.isArray(node.widgets_values) ? [...node.widgets_values] : []
-      const slot = node.type === 'pymss_load_audio_batch' ? 3 : 1
-      const name = `studio_input_${id}`
-      while (widgets.length <= slot) widgets.push('')
-      widgets[slot] = name
-      widgets[0] = ''
-      node.widgets_values = widgets
-      slotNames.set(id, name)
-    }
-  }
-  if (!defaultDirectory.trim() || outputNodes.some(node => !(bindings.outputs[node.id] || defaultDirectory).trim())) {
+  const sharedDirectory = bindings.outputDirectory
+  if (outputNodes.some(node => !(sharedDirectory || bindings.outputs[node.id] || defaultDirectory).trim())) {
     throw new Error('workbench.missingOutputDirectory')
   }
   const files = primary ? filesByNode.get(primary.id)! : ['']
   return {
     definition: transient,
     runs: files.map(input => {
-      const inputs = Object.fromEntries(inputNodes.flatMap(node => {
-        const name = slotNames.get(node.id)
-        return name ? [[name, node.id === primary?.id ? input : filesByNode.get(node.id)![0]]] : []
-      }))
       const outputs = Object.fromEntries(outputNodes.map(node => {
-        const root = workbenchOutputDirectory(node, bindings.outputs[node.id], defaultDirectory)
+        const root = workbenchOutputDirectory(node, sharedDirectory || bindings.outputs[node.id], defaultDirectory)
         return [node.id, bindings.outputLayout === 'folders' ? appendDirectory(root, fileStem(input)) : root]
       }))
-      return { input, inputs, outputs }
+      return { input, inputs: {}, outputs }
     }),
   }
 }
@@ -148,4 +133,56 @@ export function visibleWorkflowNodeId(runtimeId: string, definition: Record<stri
 
 export const WORKFLOW_NODE_STATUS_KEYS: Record<string, string> = {
   running: 'workbench.running', done: 'workbench.done', failed: 'workbench.failed', cancelled: 'workbench.cancelled',
+}
+
+export function visibleWorkflowNodeStates(definition: Record<string, unknown>, states: Record<string, WorkflowNodeState> = {}): Record<string, WorkflowNodeState> {
+  const result: Record<string, WorkflowNodeState> = {}
+  for (const [id, state] of Object.entries(states)) {
+    const visible = visibleWorkflowNodeId(id, definition)
+    if (!visible) continue
+    result[visible] = id.includes(':mix:') && state.status === 'done' ? { ...state, status: 'running' } : state
+  }
+  if (detectWorkflowFormat(definition) === 'simple' && result.save) {
+    const outputs = workflowOutputNodes(definition).map(node => states[node.id])
+    result.save = {
+      status: outputs.some(state => state?.status === 'failed') ? 'failed'
+        : outputs.some(state => state?.status === 'cancelled') ? 'cancelled'
+        : outputs.length && outputs.every(state => state?.status === 'done') ? 'done' : 'running',
+      progress: outputs.reduce((sum, state) => sum + (state?.progress || 0), 0) / Math.max(1, outputs.length),
+    }
+  }
+  return result
+}
+
+/** Compare processing data while ignoring camera positions and node appearance. */
+export function workflowExecutionSignature(definition: Record<string, unknown>): string {
+  const data = cloneWorkflow(definition)
+  if (detectWorkflowFormat(data) === 'simple') delete data.studio
+  else {
+    for (const key of ['last_node_id', 'last_link_id', 'groups']) delete data[key]
+    for (const node of (Array.isArray(data.nodes) ? data.nodes : []).filter(record)) {
+      for (const key of ['pos', 'size', 'color', 'bgcolor', 'boxcolor', 'shape', 'order']) delete node[key]
+      if (record(node.flags)) {
+        delete node.flags.collapsed
+        if (!Object.keys(node.flags).length) delete node.flags
+      }
+    }
+    if (Array.isArray(data.nodes)) data.nodes.sort((a, b) => String(a.id).localeCompare(String(b.id)))
+    if (Array.isArray(data.links)) data.links.sort((a, b) => String(Array.isArray(a) ? a[0] : a.id).localeCompare(String(Array.isArray(b) ? b[0] : b.id)))
+    if (record(data.extra)) {
+      for (const key of ['ds', 'viewport', 'studioViewport']) delete data.extra[key]
+      if (!Object.keys(data.extra).length) delete data.extra
+    }
+  }
+  return JSON.stringify(canonical(data))
+}
+
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical)
+  if (!record(value)) return value
+  return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]))
+}
+
+export function workflowBindingsEqual(first: WorkflowRuntimeBindings, second: WorkflowRuntimeBindings): boolean {
+  return JSON.stringify(canonical(first)) === JSON.stringify(canonical(second))
 }

@@ -256,8 +256,8 @@ async function listenForMainWorkflowEvent<T>(event: string, handler: EventCallba
   else workflowEventUnlisteners.push(unlisten)
 }
 
-function handleWorkflowEditorClosed(kind: 'advanced' | 'simple') {
-  void workflow.handleEditorClosed(kind).catch((error) => {
+function handleWorkflowEditorClosed(kind: 'advanced' | 'simple', label?: string) {
+  void workflow.handleEditorClosed(kind, label).catch((error) => {
     console.warn('Failed to refresh workflows after editor closed', error)
   })
 }
@@ -267,11 +267,17 @@ onMounted(async () => {
     bootReady.value = true
   }, 120)
   if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window) {
-    await listenForMainWorkflowEvent('pymss://workflow-node-editor-closed', () => {
-      handleWorkflowEditorClosed('advanced')
+    await listenForMainWorkflowEvent('pymss://workflow-editors-changed', event => {
+      workflow.applyEditorSnapshot(event.payload)
     })
-    await listenForMainWorkflowEvent('pymss://workflow-simple-editor-closed', () => {
-      handleWorkflowEditorClosed('simple')
+    if (isMainTaskOwner() && !isStandaloneRoute.value) {
+      try { await workflow.refreshEditorWindows() } catch (error) { console.warn('Failed to refresh workflow editors', error) }
+    }
+    await listenForMainWorkflowEvent<{ label?: string }>('pymss://workflow-node-editor-closed', event => {
+      handleWorkflowEditorClosed('advanced', event.payload?.label)
+    })
+    await listenForMainWorkflowEvent<{ label?: string }>('pymss://workflow-simple-editor-closed', event => {
+      handleWorkflowEditorClosed('simple', event.payload?.label)
     })
     await listenForMainWorkflowEvent<{ action?: string; workflowId?: string; bindings?: WorkflowRuntimeBindings }>('pymss://workflow-simple-editor-action', async (event) => {
       // `WebviewWindow.emit` broadcasts to every webview.  Only the main

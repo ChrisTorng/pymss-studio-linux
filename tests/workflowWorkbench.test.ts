@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createWorkflowBindings, prepareWorkbenchRun, visibleWorkflowNodeId, workflowOutputNodes } from '../src/workflows/workbench.ts'
+import { createWorkflowBindings, prepareWorkbenchRun, visibleWorkflowNodeId, workflowOutputNodes, workflowExecutionSignature, workflowBindingsEqual } from '../src/workflows/workbench.ts'
 
 const graph = {
   nodes: [
@@ -11,7 +11,7 @@ const graph = {
   ], links: [],
 }
 
-test('workbench isolates input slots and freezes per-node directories without modifying the saved graph', () => {
+test('native graphs retain their paths, batch options and save parameters without Studio binding overrides', () => {
   const bindings = createWorkflowBindings()
   bindings.inputs = { '1': { files: ['C:/music/one.wav', 'C:/music/two.wav'] }, '2': { files: ['C:/music/reference.wav'] } }
   bindings.primaryInput = '1'
@@ -20,23 +20,22 @@ test('workbench isolates input slots and freezes per-node directories without mo
   const original = JSON.stringify(graph)
   const prepared = prepareWorkbenchRun(graph, bindings, 'D:/output')
   assert.equal(JSON.stringify(graph), original)
-  assert.equal(prepared.runs.length, 2)
-  assert.deepEqual(prepared.runs[1].inputs, { studio_input_1: 'C:/music/two.wav', studio_input_2: 'C:/music/reference.wav' })
-  assert.equal(prepared.runs[1].outputs['4'].replaceAll('\\', '/'), 'D:/other/two')
-  assert.equal(prepared.runs[1].outputs['3'].replaceAll('\\', '/'), 'D:/output/two')
+  assert.deepEqual(prepared.definition, graph)
+  assert.deepEqual(prepared.runs, [{ input: '', inputs: {}, outputs: {} }])
   bindings.inputs['1'].files[0] = 'changed.wav'
-  assert.equal(prepared.runs[0].input, 'C:/music/one.wav')
-  assert.equal((prepared.definition.nodes as any[])[1].widgets_values[0], '')
+  ;(prepared.definition.nodes as any[])[0].widgets_values[0] = 'next.wav'
+  assert.equal(JSON.stringify(graph), original)
 })
 
-test('workbench requires explicit bindings and rejects ambiguous multi-file pairing', () => {
+test('simple workflows require input bindings and retain per-file batching', () => {
+  const definition = { version: 1, steps: [{ id: 'split', model: 'model', stems: ['Vocals'], save: { Vocals: 'Default' } }] }
   const bindings = createWorkflowBindings()
-  assert.throws(() => prepareWorkbenchRun(graph, bindings, 'out'), /missingInput/)
-  bindings.inputs = { '1': { files: ['a', 'b'] }, '2': { files: ['c', 'd'] } }
-  assert.throws(() => prepareWorkbenchRun(graph, bindings, 'out'), /multipleBatches/)
-  bindings.inputs['2'].files = ['c']
-  bindings.primaryInput = '2'
-  assert.throws(() => prepareWorkbenchRun(graph, bindings, 'out'), /primaryBatch/)
+  assert.throws(() => prepareWorkbenchRun(definition, bindings, 'out'), /missingInput/)
+  bindings.inputs.input = { files: ['first.wav', 'second.wav'] }
+  const prepared = prepareWorkbenchRun(definition, bindings, 'out')
+  assert.deepEqual(prepared.runs.map(run => run.input), ['first.wav', 'second.wav'])
+  assert.deepEqual(prepared.definition, definition)
+  assert.deepEqual(prepared.runs.map(run => run.outputs), [{ 'save:split:Vocals': 'out' }, { 'save:split:Vocals': 'out' }])
 })
 
 test('simple output identities and generated operation nodes map to their editor identities', () => {
@@ -46,4 +45,50 @@ test('simple output identities and generated operation nodes map to their editor
   assert.equal(visibleWorkflowNodeId('studio:ensemble:mix:mix:2', definition), 'mix')
   assert.equal(visibleWorkflowNodeId('studio:ensemble-save:mix', definition), 'save')
   assert.equal(visibleWorkflowNodeId('unknown-helper', definition), '')
+})
+
+test('the simple save node uses one runtime directory for all stems and future output nodes', () => {
+  const definition = { version: 1, steps: [{ id: 'split', stems: ['Vocals', 'Instrumental'], save: { Vocals: 'Default', Instrumental: 'Default' } }] }
+  const bindings = createWorkflowBindings()
+  bindings.inputs.input = { files: ['C:/music/one.wav'] }
+  bindings.outputDirectory = 'D:/selected'
+  bindings.outputs['save:split:Vocals'] = 'D:/previous'
+  const prepared = prepareWorkbenchRun(definition, bindings, 'D:/default')
+  assert.deepEqual(Object.values(prepared.runs[0].outputs), ['D:/selected', 'D:/selected'])
+  assert.equal('outputDirectory' in prepared.definition, false)
+})
+
+test('simple layout changes preserve execution highlighting while processing changes invalidate it', () => {
+  const definition = { version: 1, studio: { viewport: { zoom: 1 } }, steps: [], ensembles: [{ id: 'phase', algorithm: 'invert', output_stem: 'Result' }] }
+  const moved = structuredClone(definition)
+  moved.studio.viewport.zoom = .5
+  assert.equal(workflowExecutionSignature(definition), workflowExecutionSignature(moved))
+  moved.ensembles[0].algorithm = 'sum'
+  assert.notEqual(workflowExecutionSignature(definition), workflowExecutionSignature(moved))
+})
+
+test('graph camera, appearance and layering do not change its processing signature', () => {
+  const definition = structuredClone(graph)
+  const moved = { ...structuredClone(graph), extra: { ds: { scale: .5, offset: [30, 40] } } }
+  Object.assign(moved.nodes[0], { pos: [100, 200], size: [320, 400], flags: { collapsed: true }, order: 8 })
+  moved.nodes.reverse()
+  assert.equal(workflowExecutionSignature(definition), workflowExecutionSignature(moved))
+  moved.nodes[0].widgets_values[0] = 'changed'
+  assert.notEqual(workflowExecutionSignature(definition), workflowExecutionSignature(moved))
+})
+
+test('changing input files or output settings invalidates matching execution bindings', () => {
+  const original = createWorkflowBindings()
+  original.inputs = { input: { files: ['first.wav', 'second.wav'] } }
+  original.outputDirectory = 'D:/selected'
+  assert.equal(workflowBindingsEqual(original, structuredClone(original)), true)
+  for (const change of [
+    (value: typeof original) => { value.inputs.input.files.reverse() },
+    (value: typeof original) => { value.outputDirectory = 'D:/next' },
+    (value: typeof original) => { value.outputLayout = 'folders' },
+  ]) {
+    const changed = structuredClone(original)
+    change(changed)
+    assert.equal(workflowBindingsEqual(original, changed), false)
+  }
 })

@@ -951,3 +951,12 @@ test('graph defaults metadata and live widgets update independently', () => {
   assert.equal(nodes[2].widgets[0].value, 'mp3')
   assert.equal(source.nodes[0].widgets_values[1], 'cpu')
 })
+test('unfinished model and output selection remain editable after saving and reopening', () => {
+  const definition = { version: 1, steps: [{ id: 'step1', model: '', input: 'input', stems: [], save: {} }] }
+  const saved = buildSimpleWorkflowDefinition(hydrateSimpleWorkflow(definition))
+  assert.equal(analyzeSimpleWorkflow(saved).editable, true)
+  const reopened = hydrateSimpleWorkflow(saved)
+  assert.equal(reopened.steps[0].model, '')
+  assert.deepEqual(reopened.steps[0].stems, [])
+  assert.deepEqual(reopened.steps[0].save, {})
+})

@@ -37,11 +37,12 @@ assert.equal(selected.length, names.size)
 const code = ts.transpileModule(selected.map(statement => statement.getText(script)).join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText
-const logLevelFunctions = script.statements.filter(statement => (
+const logSource = ts.createSourceFile('taskLog.ts', readFileSync(new URL('../src/utils/taskLog.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
+const logLevelFunctions = logSource.statements.filter(statement => (
   ts.isFunctionDeclaration(statement) && ['getLogLineLevel', 'getLogLineLevels'].includes(statement.name?.text)
 ))
 assert.equal(logLevelFunctions.length, 2)
-const logLevelCode = ts.transpileModule(logLevelFunctions.map(statement => statement.getText(script)).join('\n'), {
+const logLevelCode = ts.transpileModule(logLevelFunctions.map(statement => statement.getText(logSource).replace(/^export /, '')).join('\n'), {
   compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText
 const stemSelectionNames = new Set([
