@@ -1963,6 +1963,8 @@
     "failedFiles": "失败 {count}",
     "executionFile": "执行文件",
     "nodeExecution": "节点执行",
+    "playAudio": "播放",
+    "playbackPosition": "播放进度",
     "noResultsYet": "尚未生成输出文件"
   }
 }

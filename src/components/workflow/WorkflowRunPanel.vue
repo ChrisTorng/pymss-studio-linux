@@ -2,11 +2,10 @@
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useMessage } from 'naive-ui'
-import { convertFileSrc } from '@tauri-apps/api/core'
-import { isTauriRuntime } from '@/utils/appStore'
 import TaskLogConsole from '@/components/TaskLogConsole.vue'
 import WorkflowNodeLog from '@/components/workflow/WorkflowNodeLog.vue'
 import WorkflowExecutionProgress from '@/components/workflow/WorkflowExecutionProgress.vue'
+import WorkflowResultPreview from '@/components/workflow/WorkflowResultPreview.vue'
 import { visibleWorkflowNodeLogs } from '@/workflows/nodeLogs'
 import { workflowOutputNodes, visibleWorkflowNodeStates } from '@/workflows/workbench'
 import { useTaskStore } from '@/stores/task'
@@ -65,8 +64,10 @@ const detailNodes = computed(() => {
     ...(workflowOutputNodes(definition).length ? [{ id: 'save', label: t('workflows.saveNode') }] : []),
   ]
 })
-function audioSource(path: string) { return isTauriRuntime() ? convertFileSrc(path) : '' }
-function fileName(path: string) { return path.split(/[\\/]/).pop() || path }
+async function revealOutput(path: string) {
+  try { await task.revealPath(path) }
+  catch (error) { message.error(String(error)) }
+}
 async function retry() {
   if (!currentTask.value) return
   try {
@@ -103,11 +104,7 @@ async function retry() {
               </div>
             </n-tab-pane>
             <n-tab-pane name="results" :tab="t('nav.results') + ' · ' + currentTask.outputs.length">
-              <div class="run-folders"><n-button v-for="directory in currentTask.outputDirectories" :key="directory" size="small" secondary :title="directory" @click="task.revealPath(directory)">{{ t('separate.openOutput') }} · {{ fileName(directory) }}</n-button></div>
-              <div v-if="currentTask.outputs.length" class="run-output-list">
-                <article v-for="output in currentTask.outputs" :key="output.path" class="run-output"><div class="run-output__heading"><strong>{{ output.stem }}</strong><n-button size="tiny" quaternary @click="task.revealPath(output.path)">{{ t('common.open') }}</n-button></div><span :title="output.path">{{ fileName(output.path) }}</span><audio controls preload="none" :src="audioSource(output.path)" /></article>
-              </div>
-              <n-empty v-else :description="t('workbench.noResultsYet')" />
+              <WorkflowResultPreview v-if="showDetails && detailsTab === 'results'" :key="currentTask.id" :outputs="currentTask.outputs" :directories="currentTask.outputDirectories" :output-directory="currentTask.output" @reveal="revealOutput" />
             </n-tab-pane>
           </n-tabs>
           <div v-if="['failed', 'cancelled'].includes(currentTask.status)" class="run-retry"><n-button size="small" secondary @click="retry">{{ t('common.retry') }}</n-button></div>
@@ -125,17 +122,11 @@ async function retry() {
 .run-detail-selection { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .run-detail-selection label { display: grid; gap: 6px; min-width: 0; }
 .run-detail-selection label > span { color: var(--on-surface-muted); font-size: 11px; }
-.run-folders { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
-.run-output-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.run-output { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--outline); border-radius: 10px; background: var(--surface-1); }
-.run-output__heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
-.run-output > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--on-surface-muted); }
-.run-output audio { width: 100%; height: 32px; }
 .run-node-list { display: grid; gap: 10px; }
 .run-node-detail { padding: 12px; border: 1px solid var(--outline); border-radius: 10px; }
 .run-node-detail > strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .run-node-detail :deep(.workflow-node-log) { margin-top: 6px; }
 .run-node-detail :deep(.log-console) { max-height: 260px; }
 .run-retry { display: flex; justify-content: flex-end; }
-@media (max-width: 640px) { .run-detail-selection, .run-output-list { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .run-detail-selection { grid-template-columns: 1fr; } }
 </style>

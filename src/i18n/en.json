@@ -1963,6 +1963,8 @@
     "failedFiles": "Failed {count}",
     "executionFile": "Execution file",
     "nodeExecution": "Nodes",
+    "playAudio": "Play",
+    "playbackPosition": "Playback position",
     "noResultsYet": "No output files yet"
   }
 }

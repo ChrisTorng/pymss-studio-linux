@@ -179,8 +179,8 @@ with sync_playwright() as playwright:
     expect(page.locator('.run-details [data-node-log="phase"] .log-line-level')).not_to_have_count(0)
     page.screenshot(path=str(artifacts / 'simple-node-logs.png'), full_page=True)
     page.locator('.workflow-run-details-modal .n-tabs-tab').filter(has_text='结果 · 1').click()
-    expect(page.locator('.run-output')).to_have_count(1)
-    assert page.locator('.run-output > span').inner_text() == Path(page.locator('.run-output > span').get_attribute('title')).name
+    expect(page.locator('.result-track')).to_have_count(1)
+    assert page.locator('.result-track__title strong').inner_text() == Path(page.locator('.result-track__title strong').get_attribute('title')).name
     page.wait_for_timeout(250)
     page.screenshot(path=str(artifacts / 'simple-results.png'), full_page=True)
     page.keyboard.press('Escape')
@@ -282,7 +282,7 @@ with sync_playwright() as playwright:
     expect(page.locator('.run-details .log-console')).to_be_visible()
     expect(page.locator('.run-details canvas')).to_have_count(0)
     page.locator('.workflow-run-details-modal .n-tabs-tab').filter(has_text='结果 · 3').click()
-    expect(page.locator('.run-details .run-output')).to_have_count(3)
+    expect(page.locator('.run-details .result-track')).to_have_count(3)
     page.wait_for_timeout(250)
     page.screenshot(path=str(artifacts / 'advanced-results.png'), full_page=True)
     page.locator('.workflow-run-details-modal .n-tabs-tab').filter(has_text='节点执行').click()
