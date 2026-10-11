@@ -280,6 +280,7 @@ const paletteCategories = computed(() => {
   locale.value
   const groups: Record<string, { type: string; title: string }[]> = {}
   for (const spec of Object.values(ALL_SPECS)) {
+    if (spec.hidden) continue
     const cat = translateNodeCategory(spec.category || 'pymss', nodeTranslator)
     ;(groups[cat] ||= []).push({
       type: spec.type,
@@ -459,6 +460,15 @@ watch(definition, () => {
 // --- lifecycle -------------------------------------------------------------
 let disposeCanvasDpi: (() => void) | null = null
 let executionResizeObserver: ResizeObserver | null = null
+function disableEmptyCanvasDoubleClick(event: PointerEvent) {
+  const canvas = canvasRef.value
+  const graph = graphRef.value
+  if (!canvas || !graph || event.button !== 0) return
+  const [x, y] = canvas.graph_mouse
+  if (!graph.getNodeOnPos(x, y, canvas.visible_nodes) && !graph.getGroupOnPos(x, y)) {
+    canvas.pointer.onDoubleClick = undefined
+  }
+}
 function fitExecutionCanvas() {
   const canvas = canvasRef.value
   const element = canvasEl.value
@@ -488,7 +498,6 @@ onMounted(() => {
   canvasRef.value = canvas
   // Transient host display only; node styles, selection and serialized JSON stay native.
   canvas.onDrawForeground = drawRunningNodes
-  // Native double-click and connection searches retain LiteGraph's port filters.
   // Track link/property edits so separate node stems follow the chosen model.
   graph.onNodeAdded = (node: any) => {
     if (ready.value && !configuringGraph) {
@@ -501,6 +510,8 @@ onMounted(() => {
     if (ready.value) scheduleSnap()
   }
   if (canvasRef.value) canvasRef.value.read_only = Boolean(props.readonly)
+  // Run after LiteGraph's capture listener has selected this gesture's actions.
+  canvasEl.value.addEventListener('pointerdown', disableEmptyCanvasDoubleClick, true)
   document.addEventListener('keyup', restoreReadonlyAfterKeyup, true)
   canvasEl.value.addEventListener('keydown', onCanvasKey)
   window.addEventListener('keydown', onEditorKey)
@@ -518,6 +529,7 @@ onBeforeUnmount(() => {
   disposeCanvasDpi?.()
   disposeCanvasDpi = null
   executionResizeObserver?.disconnect()
+  canvasEl.value?.removeEventListener('pointerdown', disableEmptyCanvasDoubleClick, true)
   canvasEl.value?.removeEventListener('keydown', onCanvasKey)
   window.removeEventListener('keydown', onEditorKey)
   document.removeEventListener('keyup', restoreReadonlyAfterKeyup, true)

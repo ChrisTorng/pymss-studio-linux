@@ -92,7 +92,7 @@ export function prepareWorkbenchRun(
 ): { definition: Record<string, unknown>; runs: WorkbenchRun[] } {
   const transient = cloneWorkflow(definition)
   if (detectWorkflowFormat(transient) === 'graph') {
-    if (!defaultDirectory.trim()) throw new Error('workbench.missingOutputDirectory')
+    if (!(bindings.outputDirectory?.trim() || defaultDirectory.trim())) throw new Error('workbench.missingOutputDirectory')
     return { definition: transient, runs: [{ input: '', inputs: {}, outputs: {} }] }
   }
   const inputNodes = workflowInputNodes(transient)

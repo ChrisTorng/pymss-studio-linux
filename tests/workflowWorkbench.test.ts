@@ -38,6 +38,18 @@ test('simple workflows require input bindings and retain per-file batching', () 
   assert.deepEqual(prepared.runs.map(run => run.outputs), [{ 'save:split:Vocals': 'out' }, { 'save:split:Vocals': 'out' }])
 })
 
+test('native graphs validate the selected output root without injecting it into the graph', () => {
+  const bindings = createWorkflowBindings()
+  assert.throws(() => prepareWorkbenchRun(graph, bindings, ''), /missingOutputDirectory/)
+  bindings.outputDirectory = 'E:/Selected'
+  const prepared = prepareWorkbenchRun(graph, bindings, '')
+  assert.deepEqual(prepared.definition, graph)
+  assert.deepEqual(prepared.runs, [{ input: '', inputs: {}, outputs: {} }])
+  bindings.outputDirectory = '   '
+  assert.throws(() => prepareWorkbenchRun(graph, bindings, ''), /missingOutputDirectory/)
+  assert.doesNotThrow(() => prepareWorkbenchRun(graph, bindings, 'D:/Default'))
+})
+
 test('simple output identities and generated operation nodes map to their editor identities', () => {
   const definition = { version: 1, steps: [{ id: 'split', stems: ['Vocals'], save: { Vocals: 'Default' } }], ensembles: [{ id: 'mix', save: 'Default', output_stem: 'Instrumental' }] }
   assert.deepEqual(workflowOutputNodes(definition).map(node => node.id), ['save:split:Vocals', 'studio:ensemble-save:mix'])

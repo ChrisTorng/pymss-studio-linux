@@ -509,6 +509,7 @@ function makeNodeClass(spec: NodeSpec): any {
   const klass = class extends LGraphNode {
     static title = translateNodeTitle(spec)
     static category = translateNodeCategory(spec.category)
+    static skip_list = Boolean(spec.hidden)
     stems: string[] = spec.dynamicStems ? DEFAULT_STEMS : []
 
     constructor(title?: string) {
@@ -613,6 +614,9 @@ export function registerPymssNodes(translator?: NodeTranslator) {
   const register = (spec: NodeSpec, type = spec.type) => {
     const cls = makeNodeClass(spec) as any
     LiteGraph.registerNodeType(type, cls)
+    // Native search enumerates the registry without checking skip_list.
+    // Keep legacy types addressable by name for imports, outside that catalog.
+    if (spec.hidden) Object.defineProperty(LiteGraph.registered_node_types, type, { enumerable: false })
     // registerNodeType 用 type 名派生 category(无 '/' 时置空串,覆盖类的
     // static category),导致右键 Add Node 菜单按类别分组为空。补回 spec.category。
     cls.category = translateNodeCategory(spec.category)

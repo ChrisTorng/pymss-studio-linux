@@ -1906,7 +1906,6 @@
       "noMatchingNodes": "未找到匹配节点",
       "paletteKeyboardHint": "↑↓ 选择 · Enter 添加 · Esc 关闭",
       "loadFailed": "节点图加载失败",
-      "nodeSettingsHint": "设备、模型参数与输出设置在各节点内配置。",
       "incompleteGraph": "部分节点无法在编辑器中还原，原始工作流已保留。"
     },
     "workflowValidationTitle": "工作流需要调整",
@@ -1947,8 +1946,7 @@
     "editorWindowOpenFailed": "无法打开工作流窗口，请重试。",
     "simpleMode": "简易编辑",
     "openAdvancedEditor": "打开高级节点编辑器",
-    "editSimpleAction": "编辑步骤",
-    "editAdvancedAction": "编辑节点图"
+    "openEditorAction": "打开编辑器"
   },
   "workbench": {
     "copyLogs": "复制日志",
@@ -1967,6 +1965,7 @@
     "chooseFolder": "选择文件夹",
     "chooseOutput": "选择输出目录",
     "defaultOutput": "默认目录",
+    "outputRootHint": "保存节点指定的子目录位于此目录下。",
     "inputCount": "本次输入 {count} 个文件",
     "primaryInput": "设为主输入",
     "mainWindowOnly": "请在主窗口运行工作流。",

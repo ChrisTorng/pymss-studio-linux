@@ -124,36 +124,57 @@ test('legacy persisted custom directories are ignored on startup', async () => {
   assert.equal(task.separateOutputDir, 'D:/DefaultOutput')
 })
 
-test('native graph submission and retry preserve graph parameters and the output root as one task', async () => {
+for (const selectedDirectory of [undefined, 'E:/WorkflowOutput']) {
+  test(`native graph submission and retry preserve the ${selectedDirectory ? 'selected' : 'default'} output root and graph parameters`, async () => {
+    storage()
+    const task = await newStore()
+    const definition = {
+      nodes: [
+        { id: 1, type: 'pymss_load_audio_batch', widgets_values: ['D:/Music', true, false, ''] },
+        { id: 2, type: 'pymss_save_audio', widgets_values: ['', 'stems', '44100'] },
+      ], links: [[1, 1, 0, 2, 0, 'AUDIO']],
+    }
+    const saved = structuredClone(definition)
+    const bindings = {
+      inputs: { '1': { files: ['D:/Other/first.wav', 'D:/Other/second.wav'] } },
+      outputs: { '2': 'E:/Ignored' }, primaryInput: '1', outputLayout: 'folders',
+      outputDirectory: selectedDirectory,
+    }
+    const submitted = await task.startWorkbenchInference({ ...workflow, definition }, bindings)
+    assert.equal(submitted.total, 1)
+    const original = submitted.tasks[0]
+    assert.equal(original.input, '')
+    assert.equal(original.output, selectedDirectory || 'D:/DefaultOutput')
+    assert.equal(original.jobOutput, original.output)
+    assert.equal(settings.outputDir, 'D:/DefaultOutput')
+    assert.equal(original.runConfig.outputLayout, 'flat')
+    assert.equal(original.runConfig.workbench.nativeGraph, true)
+    assert.deepEqual(original.runConfig.workflowDefinition, saved)
+    assert.deepEqual(original.runConfig.workbench.outputs, {})
+    definition.nodes[0].widgets_values[0] = 'D:/Changed'
+    assert.deepEqual(original.runConfig.workbench.sourceDefinition, saved)
+    original.status = 'failed'
+    settings.outputDir = 'F:/NextRun'
+    bindings.outputDirectory = 'G:/NextSelection'
+    const retried = await task.retryTask(original.id)
+    assert.equal(retried.output, original.output)
+    assert.deepEqual(retried.runConfig, JSON.parse(JSON.stringify(original.runConfig)))
+  })
+}
+
+test('clearing the native graph directory restores the current default for new runs', async () => {
   storage()
   const task = await newStore()
-  const definition = {
-    nodes: [
-      { id: 1, type: 'pymss_load_audio_batch', widgets_values: ['D:/Music', true, false, ''] },
-      { id: 2, type: 'pymss_save_audio', widgets_values: ['', 'stems', '44100'] },
-    ], links: [[1, 1, 0, 2, 0, 'AUDIO']],
-  }
-  const saved = structuredClone(definition)
-  const submitted = await task.startWorkbenchInference({ ...workflow, definition }, {
-    inputs: { '1': { files: ['D:/Other/first.wav', 'D:/Other/second.wav'] } },
-    outputs: { '2': 'E:/Ignored' }, primaryInput: '1', outputLayout: 'folders',
-  })
-  assert.equal(submitted.total, 1)
-  const original = submitted.tasks[0]
-  assert.equal(original.input, '')
-  assert.equal(original.output, 'D:/DefaultOutput')
-  assert.equal(original.runConfig.outputLayout, 'flat')
-  assert.equal(original.runConfig.workbench.nativeGraph, true)
-  assert.deepEqual(original.runConfig.workflowDefinition, saved)
-  assert.deepEqual(original.runConfig.workbench.outputs, {})
-  definition.nodes[0].widgets_values[0] = 'D:/Changed'
-  assert.deepEqual(original.runConfig.workbench.sourceDefinition, saved)
-  original.status = 'failed'
-  settings.outputDir = 'F:/NextRun'
-  const retried = await task.retryTask(original.id)
-  assert.equal(retried.output, 'D:/DefaultOutput')
-  assert.deepEqual(retried.runConfig, JSON.parse(JSON.stringify(original.runConfig)))
+  const graph = { ...workflow, definition: { nodes: [{ id: 1, type: 'pymss_save_audio' }], links: [] } }
+  const bindings = { inputs: {}, outputs: {}, primaryInput: '', outputLayout: 'flat', outputDirectory: 'E:/Selected' }
+  const first = await task.startWorkbenchInference(graph, bindings)
+  delete bindings.outputDirectory
+  settings.outputDir = 'F:/NewDefault'
+  const second = await task.startWorkbenchInference(graph, bindings)
+  assert.equal(first.tasks[0].output, 'E:/Selected')
+  assert.equal(second.tasks[0].output, 'F:/NewDefault')
 })
+
 
 for (const layout of ['flat', 'folders']) {
   test(`simple workbench ${layout} output roots use the chosen directory and remain frozen on retry`, async () => {

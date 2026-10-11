@@ -2131,7 +2131,7 @@ export const useTaskStore = defineStore('task', () => {
     const validationError = workflowDefinitionValidationError(workflow.definition)
     if (validationError) throw new Error(validationError)
     const nativeGraph = detectWorkflowFormat(workflow.definition) === 'graph'
-    const directory = resolveOutputDirectory(nativeGraph ? undefined : bindings.outputDirectory, useSettingsStore().outputDir)
+    const directory = resolveOutputDirectory(bindings.outputDirectory, useSettingsStore().outputDir)
     const prepared = prepareWorkbenchRun(workflow.definition, bindings, directory)
     const jobId = createRunId('job')
     const runtimeEntry = { ...workflow, definition: prepared.definition }

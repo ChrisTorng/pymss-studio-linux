@@ -1906,7 +1906,6 @@
       "noMatchingNodes": "No matching nodes",
       "paletteKeyboardHint": "↑↓ Select · Enter Add · Esc Close",
       "loadFailed": "Unable to load node graph",
-      "nodeSettingsHint": "Device, model parameters, and output settings are configured in each node.",
       "incompleteGraph": "Some nodes could not be restored in the editor. The original workflow has been preserved."
     },
     "workflowValidationTitle": "Workflow requires changes",
@@ -1947,8 +1946,7 @@
     "editorWindowOpenFailed": "Unable to open the workflow window. Please try again.",
     "simpleMode": "Simple Edit",
     "openAdvancedEditor": "Open Advanced Node Editor",
-    "editSimpleAction": "Edit steps",
-    "editAdvancedAction": "Edit node graph"
+    "openEditorAction": "Open Editor"
   },
   "workbench": {
     "copyLogs": "Copy logs",
@@ -1967,6 +1965,7 @@
     "chooseFolder": "Choose Folder",
     "chooseOutput": "Choose Output Directory",
     "defaultOutput": "Default Directory",
+    "outputRootHint": "Subdirectories specified by save nodes are relative to this directory.",
     "inputCount": "{count} input files",
     "primaryInput": "Set Primary Input",
     "mainWindowOnly": "Run workflows in the main window.",

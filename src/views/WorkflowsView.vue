@@ -1011,7 +1011,7 @@ watch([workflows, selectedWorkflowId], () => {
             <div class="wf-actionbar__primary">
               <n-button v-if="selectedSimpleAnalysis?.editable || isComfyWorkflow" type="primary" size="large" @click="openWorkflowEditor(selectedWorkflow)">
                 <template #icon><n-icon :component="selectedSimpleAnalysis?.editable ? ListOutline : GitNetworkOutline" /></template>
-                {{ selectedSimpleAnalysis?.editable ? t('workflows.editSimpleAction') : t('workflows.editAdvancedAction') }}
+                {{ t('workflows.openEditorAction') }}
               </n-button>
             </div>
             <div class="wf-actionbar__more">
