@@ -1211,6 +1211,46 @@ watch([workflows, selectedWorkflowId], () => {
   overflow: auto;
   margin: 0 -4px;
   padding: 0 4px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--on-surface-muted) 44%, transparent) transparent;
+}
+
+@supports selector(::-webkit-scrollbar) {
+  .wf-list-scroll {
+    scrollbar-width: auto;
+    scrollbar-color: auto;
+  }
+}
+
+.wf-list-scroll::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.wf-list-scroll::-webkit-scrollbar-track {
+  border-radius: 999px;
+  background: transparent;
+}
+
+.wf-list-scroll::-webkit-scrollbar-thumb {
+  min-height: 28px;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--on-surface-muted) 44%, transparent) padding-box;
+}
+
+.wf-list-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--primary) 64%, transparent) padding-box;
+}
+
+.wf-list-scroll::-webkit-scrollbar-button,
+.wf-list-scroll::-webkit-scrollbar-corner {
+  display: none;
+  width: 0;
+  height: 0;
+  background: transparent;
 }
 
 .wf-list {
