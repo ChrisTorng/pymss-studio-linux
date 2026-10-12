@@ -1,5 +1,6 @@
 """Check diagnostics with isolated stores and mocked desktop commands."""
 import argparse
+import re
 from pathlib import Path
 
 from playwright.sync_api import expect, sync_playwright
@@ -27,7 +28,7 @@ with sync_playwright() as playwright:
       const stores=document.querySelector('#app').__vue_app__.config.globalProperties.$pinia._s;
       window.__app=stores.get('app');window.__settings=stores.get('settings');
       window.__tasks=stores.get('task');window.__workflow=stores.get('workflow');
-      window.__calls=[];window.__copied='';window.__runtimeFailure=false;window.__envFailure=false;window.__logFailure=false;
+      window.__calls=[];window.__revealedPaths=[];window.__copied='';window.__runtimeFailure=false;window.__envFailure=false;window.__logFailure=false;
       Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async(text)=>window.__copied=text}});
       window.__env={pythonVersion:'3.12.10',platform:'Windows-11',workerVersion:'2.1.0',
         pymssAvailable:true,pymssVersion:'2.1.8',torchAvailable:true,torchVersion:'2.7.1',
@@ -52,7 +53,8 @@ with sync_playwright() as playwright:
           if(command==='debug_runtime_pointers')return {runtimeEnvsDir:'D:/runtime',activeRuntimeFile:'D:/runtime/active-runtime.json',files:[]};
           if(command==='debug_catalog_info')return {baseCatalogPath:'D:/catalog.json',debugCatalogPath:'D:/debug/catalog.json',debugDir:'D:/debug',baseCatalog:{models:[]},debugCatalog:{models:[]},effectiveCatalog:{models:[]},status:{}};
           if(command==='debug_log_create_report'){window.__logInfo.reportExists=true;return {path:'D:/logs/report.md',exists:true,sizeBytes:240};}
-          if(command==='save_app_store'||command==='reveal_path')return;
+          if(command==='reveal_path'){window.__revealedPaths.push(args.path);return;}
+          if(command==='save_app_store')return;
           if(command==='get_build_info')return {version:'0.0.12',variant:'default',updateSupported:false};
           if(command==='plugin:event|listen')return 1;
           throw new Error('Unexpected command: '+command);
@@ -122,6 +124,52 @@ with sync_playwright() as playwright:
     expect(page.locator('.debug-activity-grid')).to_contain_text('工作流任务')
     expect(page.locator('.debug-activity-grid')).to_contain_text('批量任务 #1')
     expect(page.locator('.debug-activity-grid')).to_contain_text('高级编辑器')
+    failures = page.locator('.debug-failed-tasks')
+    expect(failures.locator('[role="listitem"]')).to_have_count(1)
+    expect(failures.locator('.debug-failed-task-pagination')).to_contain_text('显示 1–1 / 1 条')
+    expect(failures.locator('.n-pagination')).to_have_count(0)
+    page.evaluate("""() => {
+      window.__originalTasks=JSON.parse(JSON.stringify(__tasks.tasks));
+      const base=__tasks.tasks.find(item=>item.id==='task_b');
+      __tasks.tasks=[...__tasks.tasks.filter(item=>item.status!=='failed'),
+        ...Array.from({length:23},(_,index)=>({...base,id:'failure_'+(index+1),
+          updatedAt:index+1,error:index===22?Array.from({length:100},(_,line)=>'Decoder traceback line '+line).join('\\n'):'Decoder failed '+(index+1)}))];
+      window.__taskOrder=__tasks.tasks.map(item=>item.id);
+    }""")
+    expect(failures.locator('[role="listitem"]')).to_have_count(5)
+    expect(failures.locator('[role="listitem"] > code').first).to_have_text('failure_23')
+    expect(failures.locator('.debug-failed-task-pagination')).to_contain_text('显示 1–5 / 23 条')
+    first_error = failures.locator('.debug-task-entry__error').first
+    assert first_error.evaluate('el=>el.getBoundingClientRect().height<=60')
+    failures.locator('[role="listitem"]').first.get_by_role('button', name='执行日志', exact=True).click()
+    expect(page.locator('.debug-execution-log-error')).to_contain_text('Decoder traceback line 99')
+    assert page.locator('.debug-execution-log-error').evaluate('el=>el.scrollHeight>el.clientHeight')
+    page.keyboard.press('Escape')
+    failures.locator('.n-pagination-item').filter(has_text=re.compile(r'^2$')).click()
+    expect(failures.locator('[role="listitem"] > code').first).to_have_text('failure_18')
+    expect(failures.locator('.debug-failed-task-pagination')).to_contain_text('显示 6–10 / 23 条')
+    assert page.evaluate('__tasks.tasks.map(item=>item.id).join()===__taskOrder.join()')
+    failures.locator('.n-pagination-item').filter(has_text=re.compile(r'^5$')).click()
+    expect(failures.locator('[role="listitem"]')).to_have_count(3)
+    expect(failures.locator('[role="listitem"] > code').last).to_have_text('failure_1')
+    expect(failures.locator('.debug-failed-task-pagination')).to_contain_text('显示 21–23 / 23 条')
+    page.screenshot(path=str(args.output_dir / 'failed-tasks-pagination.png'), full_page=True)
+    page.evaluate("__tasks.tasks=__tasks.tasks.filter(item=>item.status!=='failed'||['failure_22','failure_23'].includes(item.id))")
+    expect(failures.locator('[role="listitem"]')).to_have_count(2)
+    expect(failures.locator('.debug-failed-task-pagination')).to_contain_text('显示 1–2 / 2 条')
+    expect(failures.locator('.n-pagination')).to_have_count(0)
+    page.evaluate("__tasks.tasks=__tasks.tasks.filter(item=>item.status!=='failed')")
+    expect(failures).to_contain_text('暂无失败任务记录。')
+    expect(failures.locator('.debug-failed-task-pagination')).to_have_count(0)
+    page.evaluate("""() => {
+      __tasks.tasks=JSON.parse(JSON.stringify(__originalTasks));
+      __tasks.tasks.find(item=>item.id==='task_b').message='Decoder failed without an error field';
+      delete __tasks.tasks.find(item=>item.id==='task_b').error;
+    }""")
+    failures.get_by_role('button', name='执行日志', exact=True).click()
+    expect(page.locator('.debug-execution-log-error')).to_have_text('Decoder failed without an error field')
+    page.keyboard.press('Escape')
+    page.evaluate('__tasks.tasks=__originalTasks')
     expect(page.locator('.n-message')).to_have_count(0, timeout=10000)
     page.screenshot(path=str(args.output_dir / 'activity.png'), full_page=True)
     page.locator('.debug-task-entry').filter(has_text='task_a').get_by_role('button', name='执行日志', exact=True).click()
@@ -138,6 +186,9 @@ with sync_playwright() as playwright:
     expect(page.locator('.debug-log-row')).to_contain_text('Node started')
     page.get_by_role('button', name='复制筛选日志', exact=True).click()
     assert 'task_a' in page.evaluate('__copied') and 'task_b' not in page.evaluate('__copied')
+    expect(page.get_by_role('button', name='生成诊断报告', exact=True)).to_have_count(1)
+    expect(page.locator('.debug-log-toolbar').get_by_role('button', name='生成诊断报告', exact=True)).to_have_count(0)
+    expect(page.locator('.debug-log-toolbar').get_by_role('button', name='打开诊断报告', exact=True)).to_have_count(0)
     # Failed refresh keeps the previous tail and displays the actual read error.
     page.evaluate('__logFailure=true')
     page.locator('.debug-log-toolbar').get_by_role('button', name='刷新', exact=True).click()
@@ -205,6 +256,8 @@ with sync_playwright() as playwright:
     page.locator('.debug-header-actions').get_by_role('button', name='生成诊断报告', exact=True).click()
     page.wait_for_function("__calls.includes('reveal_path')")
     assert page.evaluate("__calls.filter(c=>c==='debug_log_create_report').length") == 1
+    expect(page.get_by_role('button', name='打开诊断报告', exact=True)).to_have_count(0)
+    assert page.evaluate('__revealedPaths') == ['D:/logs/report.md']
 
     page.locator('.debug-tabs').get_by_role('button', name='运行环境', exact=True).click()
     expect(page.locator('.runtime-status-panel')).to_be_visible()
@@ -225,4 +278,4 @@ with sync_playwright() as playwright:
     assert not errors, errors
     browser.close()
 
-print('PASS: diagnostic states, lazy reads, refresh recovery, activity, task logs, filtered copy, events, themes and narrow layout')
+print('PASS: diagnostic states, lazy reads, refresh recovery, paginated failures, long errors, report actions, task logs, filtered copy, events, themes and narrow layout')

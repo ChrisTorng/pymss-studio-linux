@@ -213,7 +213,13 @@ const eventIssuesOnly = ref(false)
 const debugLogError = ref('')
 const executionLogVisible = ref(false)
 const executionLogTaskId = ref('')
+const failedTaskPage = ref(1)
+const failedTaskPageSize = 5
+const failedTaskScroller = ref<HTMLElement | null>(null)
 const executionLogTask = computed(() => task.tasks.find(item => item.id === executionLogTaskId.value))
+const executionLogError = computed(() => executionLogTask.value?.error
+  || (executionLogTask.value?.status === 'failed' ? executionLogTask.value.message : '')
+  || '')
 const isMac = computed(() => detectRuntimePlatform(app.runtimeInfo).isMac)
 const diagnostics = computed(() => buildDiagnosticChecks({
   env: app.envInfo, runtime: app.runtimeInfo, envError: app.envError, runtimeError: app.runtimeInfoError,
@@ -230,7 +236,19 @@ const diagnosticGroups = computed(() => [
   { key: 'connection', title: t('debug.connection'), hint: t('debug.groupConnectionHint'), icon: TerminalOutline },
 ].map(group => ({ ...group, checks: diagnostics.value.filter(check => check.group === group.key) })))
 const diagnosticBusy = computed(() => checkingDiagnostics.value || optionalChecking.value || app.envLoading || app.runtimeInfoLoading)
-const failedTasks = computed(() => [...task.failedTasks].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 8))
+const failedTasks = computed(() => [...task.failedTasks].sort((a, b) => b.updatedAt - a.updatedAt))
+const failedTaskPageCount = computed(() => Math.max(1, Math.ceil(failedTasks.value.length / failedTaskPageSize)))
+const pagedFailedTasks = computed(() => {
+  const start = (failedTaskPage.value - 1) * failedTaskPageSize
+  return failedTasks.value.slice(start, start + failedTaskPageSize)
+})
+watch(failedTaskPageCount, (count) => {
+  failedTaskPage.value = Math.min(failedTaskPage.value, count)
+})
+watch(failedTaskPage, async () => {
+  await nextTick()
+  if (failedTaskScroller.value) failedTaskScroller.value.scrollTop = 0
+})
 const env = computed(() => app.envInfo)
 const workerEventGroups = computed(() => groupWorkerEvents(app.workerEvents as DebugWorkerEvent[]))
 const recentWorkerEventGroups = computed(() => {
@@ -1057,7 +1075,7 @@ async function copyDebugLog() {
 }
 
 async function createDebugLogReport() {
-  if (!developerMode.value) return
+  if (!developerMode.value || debugLogReportLoading.value || debugLogClearing.value) return
   debugLogReportLoading.value = true
   try {
     const report = await invoke<DebugLogReport>('debug_log_create_report')
@@ -1486,7 +1504,7 @@ watch(developerMode, (enabled) => {
       </div>
       <div class="debug-header-actions">
         <n-button secondary :disabled="!developerMode || diagnosticBusy" @click="copyDiagnosticSummary">{{ t('debug.copySummary') }}</n-button>
-        <n-button secondary :disabled="!developerMode" :loading="debugLogReportLoading" @click="createDebugLogReport">{{ t('debug.createReport') }}</n-button>
+        <n-button secondary :disabled="!developerMode || debugLogClearing" :loading="debugLogReportLoading" @click="createDebugLogReport">{{ t('debug.createReport') }}</n-button>
         <n-button type="primary" :disabled="!developerMode || diagnosticBusy" :loading="diagnosticBusy" @click="checkEnv">
           <template #icon><n-icon :component="RefreshOutline" /></template>
           {{ diagnosticBusy ? t('settings.checkingEnv') : t('settings.checkEnv') }}
@@ -2086,19 +2104,34 @@ watch(developerMode, (enabled) => {
         </div>
       </n-card>
 
-      <n-card class="debug-card" :bordered="true" size="small">
+      <n-card class="debug-card debug-failed-tasks" :bordered="true" size="small">
         <template #header><div class="debug-section-title"><n-icon :component="AlertCircleOutline" /><span>{{ t('debug.recentFailures') }}</span></div></template>
-        <div class="task-debug-list">
-          <div v-for="item in failedTasks" :key="item.id" class="debug-task-entry">
+        <div ref="failedTaskScroller" class="task-debug-list debug-failed-task-list" :tabindex="failedTasks.length ? 0 : undefined" role="list" :aria-label="t('debug.recentFailures')">
+          <div v-for="item in pagedFailedTasks" :key="item.id" class="debug-task-entry" role="listitem">
             <div class="debug-task-entry__head"><strong>{{ item.runConfig?.workflowName || item.model }}</strong><span>{{ new Date(item.updatedAt).toLocaleString() }}</span></div>
             <code :title="item.id">{{ shortTaskId(item.id) }}</code>
-            <p class="debug-task-entry__error">{{ item.error || item.message }}</p>
+            <p class="debug-task-entry__error" :title="item.error || item.message">{{ item.error || item.message }}</p>
             <div class="debug-task-entry__actions">
               <n-button size="tiny" tertiary @click="showExecutionLogs(item.id)">{{ t('debug.executionLogs') }}</n-button>
               <n-button size="tiny" tertiary @click="showTaskLogs(item.id)">{{ t('debug.taskLogs') }}</n-button>
             </div>
           </div>
           <n-empty v-if="!failedTasks.length" :description="t('debug.noFailures')" />
+        </div>
+        <div v-if="failedTasks.length" class="debug-failed-task-pagination">
+          <span aria-live="polite">{{ t('debug.failurePageSummary', {
+            start: (failedTaskPage - 1) * failedTaskPageSize + 1,
+            end: Math.min(failedTaskPage * failedTaskPageSize, failedTasks.length),
+            total: failedTasks.length,
+          }) }}</span>
+          <n-pagination
+            v-if="failedTasks.length > failedTaskPageSize"
+            v-model:page="failedTaskPage"
+            :page-size="failedTaskPageSize"
+            :item-count="failedTasks.length"
+            :page-slot="5"
+            size="small"
+          />
         </div>
       </n-card>
 
@@ -2120,7 +2153,7 @@ watch(developerMode, (enabled) => {
         <span>{{ executionLogTask?.runConfig?.workflowName || executionLogTask?.model }}</span>
         <n-button size="tiny" tertiary :disabled="!executionLogText" @click="copyText(executionLogText, 'debug.logCopied')">{{ t('common.copy') }}</n-button>
       </div>
-      <p v-if="executionLogTask?.error" class="debug-execution-log-error">{{ executionLogTask.error }}</p>
+      <p v-if="executionLogError" class="debug-execution-log-error" tabindex="0">{{ executionLogError }}</p>
       <TaskLogConsole :lines="executionLogTask?.logs || []" />
       <details v-for="(lines, nodeId) in executionLogTask?.nodeLogs || {}" :key="nodeId" class="debug-node-logs">
         <summary>{{ t('debug.nodeLogs', { node: nodeId, count: lines.length }) }}</summary>
@@ -2192,14 +2225,9 @@ watch(developerMode, (enabled) => {
           <n-button size="small" secondary :disabled="!filteredDebugLogLines.length" @click="copyDebugLog">
             {{ t('debug.copyLog') }}
           </n-button>
-          <n-button size="small" secondary :loading="debugLogReportLoading" @click="createDebugLogReport">
-            {{ t('debug.createReport') }}
-          </n-button>
-          <n-button size="small" secondary :disabled="!debugLogInfo?.reportExists" @click="revealPath(debugLogInfo?.reportPath || '')">
-            {{ t('debug.openReport') }}
-          </n-button>
+          <span class="debug-log-toolbar__spacer" />
           <n-popconfirm @positive-click="clearDebugLog">
-            <template #trigger><n-button size="small" secondary type="warning" :loading="debugLogClearing">{{ t('debug.clearLog') }}</n-button></template>
+            <template #trigger><n-button size="small" secondary type="warning" :disabled="debugLogReportLoading" :loading="debugLogClearing">{{ t('debug.clearLog') }}</n-button></template>
             {{ t('debug.confirmClearLog') }}
           </n-popconfirm>
         </div>
@@ -2491,6 +2519,40 @@ watch(developerMode, (enabled) => {
 .debug-task-entry .debug-task-entry__error { color: var(--danger); white-space: pre-wrap; }
 .debug-task-entry > .n-button { justify-self: start; }
 
+.debug-failed-task-list {
+  max-height: min(480px, 62vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.debug-failed-task-list:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+  border-radius: 10px;
+}
+
+.debug-failed-task-list .debug-task-entry__error {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+.debug-failed-task-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.debug-failed-task-pagination > span {
+  color: var(--on-surface-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .debug-event-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -2501,7 +2563,13 @@ watch(developerMode, (enabled) => {
 
 .debug-log-read-error { margin-bottom: 12px; }
 .debug-activity-grid { align-items: start; }
-.debug-execution-log-error { color: var(--danger); white-space: pre-wrap; overflow-wrap: anywhere; }
+.debug-execution-log-error {
+  max-height: min(240px, 30vh);
+  overflow: auto;
+  color: var(--danger);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .debug-node-logs { margin-top: 12px; }
 .debug-node-logs summary { padding: 8px 0; cursor: pointer; font-size: 12px; }
 
@@ -3017,6 +3085,10 @@ watch(developerMode, (enabled) => {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.debug-log-toolbar__spacer {
+  flex: 1;
 }
 
 .debug-log-meta {

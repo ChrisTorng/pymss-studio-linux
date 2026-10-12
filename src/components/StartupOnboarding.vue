@@ -4,12 +4,14 @@ import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
 import { useMessage } from 'naive-ui'
 import { useRouter } from 'vue-router'
-import { CheckmarkOutline, ColorPaletteOutline, FolderOpenOutline, HardwareChipOutline, LanguageOutline, MoonOutline } from '@vicons/ionicons5'
+import { open } from '@tauri-apps/plugin-shell'
+import { CheckmarkOutline, ColorPaletteOutline, FolderOpenOutline, HardwareChipOutline, LanguageOutline, LogoGithub, MoonOutline, OpenOutline } from '@vicons/ionicons5'
 import AppBrandMark from '@/components/AppBrandMark.vue'
 import { SYSTEM_LOCALE, setLocale, type LocaleSetting } from '@/i18n'
 import { useSettingsStore } from '@/stores/settings'
 import { useAppStore, type RuntimeBackend } from '@/stores/app'
 import { formatBytes } from '@/utils/format'
+import { isTauriRuntime } from '@/utils/appStore'
 import {
   detectRuntimePlatform,
   preferredInstalledRuntimeBackend,
@@ -47,7 +49,7 @@ const {
 } = storeToRefs(settings)
 
 const step = ref(0)
-const totalSteps = 5
+const projectRepositoryUrl = 'https://github.com/pymss-project/pymss-studio'
 const checkingModelDir = ref(false)
 const overlayRef = ref<HTMLElement | null>(null)
 const completeButtonRef = ref<HTMLElement | null>(null)
@@ -99,7 +101,6 @@ watch(preferredRuntimeBackend, (backend) => {
 }, { immediate: true })
 
 const selectedBackendInstalled = computed(() => backendInstalled(selectedBackend.value))
-const selectedBackendSize = computed(() => runtimeSizeHint(selectedBackend.value))
 
 const languageOptions = computed(() => [
   { label: t('settings.languageSystem'), value: SYSTEM_LOCALE },
@@ -123,42 +124,52 @@ const accentOptions = computed(() =>
 
 const stepList = computed(() => [
   {
+    key: 'language',
     icon: LanguageOutline,
     title: t('onboarding.languageTitle'),
     description: t('onboarding.languageDescription'),
   },
   {
+    key: 'project',
+    icon: LogoGithub,
+    title: t('onboarding.projectTitle'),
+    description: '',
+  },
+  {
+    key: 'theme',
     icon: MoonOutline,
     title: t('onboarding.themeTitle'),
     description: t('onboarding.themeDescription'),
   },
   {
+    key: 'accent',
     icon: ColorPaletteOutline,
     title: t('onboarding.accentTitle'),
     description: t('onboarding.accentDescription'),
   },
   {
+    key: 'dataDir',
     icon: FolderOpenOutline,
     title: t('onboarding.dataDirTitle'),
     description: t('onboarding.dataDirDescription'),
   },
   {
+    key: 'runtime',
     icon: HardwareChipOutline,
     title: t('onboarding.runtimeTitle'),
     description: t('onboarding.runtimeDescription'),
   },
 ])
 
+const totalSteps = computed(() => stepList.value.length)
 const stepMeta = computed(() => stepList.value[step.value])
-
-const dataDirStepIndex = 3
-const runtimeStepIndex = 4
+const currentStep = computed(() => stepMeta.value.key)
 
 const canGoNext = computed(() => {
-  if (step.value === dataDirStepIndex) {
+  if (currentStep.value === 'dataDir') {
     return !checkingModelDir.value && !isModelDirMigrating.value && modelDirMigrationState.value.status !== 'confirm'
   }
-  if (step.value === runtimeStepIndex && runtimeChecking.value) return false
+  if (currentStep.value === 'runtime' && runtimeChecking.value) return false
   return true
 })
 const modelDirMigrationVisible = computed(() => modelDirMigrationState.value.status !== 'idle' && modelDirMigrationState.value.status !== 'confirm')
@@ -226,6 +237,18 @@ async function changeOutputDir() {
   if (folder) outputDir.value = folder
 }
 
+async function openProjectUrl(url: string) {
+  try {
+    if (isTauriRuntime()) {
+      await open(url)
+    } else {
+      window.open(url, '_blank', 'noopener,noreferrer')
+    }
+  } catch {
+    message.error(t('onboarding.projectLinkFailed'))
+  }
+}
+
 function closeModelDirMigrationDialog() {
   if (modelDirMigrationState.value.status === 'confirm') {
     settings.cancelModelDirChangeConfirmation()
@@ -253,7 +276,7 @@ async function resolveModelDirConflict(action: 'overwrite' | 'skip' | 'abort') {
 }
 
 async function nextStep() {
-  if (step.value < totalSteps - 1) {
+  if (step.value < totalSteps.value - 1) {
     step.value += 1
     return true
   }
@@ -316,7 +339,7 @@ onMounted(() => {
 
 <template>
   <div ref="overlayRef" class="onboarding-overlay">
-    <div class="onboarding-card">
+    <div class="onboarding-card" :class="{ 'onboarding-card--project': currentStep === 'project' }">
       <aside class="onboarding-rail">
         <div class="onboarding-brand">
           <AppBrandMark :size="46" variant="hero" shadow />
@@ -329,7 +352,7 @@ onMounted(() => {
         <ol class="onboarding-nav">
           <li
             v-for="(meta, index) in stepList"
-            :key="index"
+            :key="meta.key"
             class="onboarding-nav__item"
             :class="{ active: index === step, done: index < step }"
           >
@@ -346,19 +369,43 @@ onMounted(() => {
           <span class="onboarding-content__counter">
             {{ t('onboarding.stepCounter', { current: step + 1, total: totalSteps }) }}
           </span>
-          <h1>{{ stepMeta.title }}</h1>
-          <p>{{ stepMeta.description }}</p>
+          <h1>{{ currentStep === 'project' ? t('onboarding.projectHeadline') : stepMeta.title }}</h1>
+          <p v-if="stepMeta.description">{{ stepMeta.description }}</p>
         </header>
 
         <div class="onboarding-content__body">
-          <section v-if="step === 0" class="onboarding-section">
+          <section v-if="currentStep === 'language'" class="onboarding-section">
             <n-select :value="locale" :options="languageOptions" size="large" :to="overlayRef || undefined" @update:value="selectLocaleOption" />
             <p v-if="locale === SYSTEM_LOCALE" class="onboarding-hint">
               {{ t('settings.languageFollowSystemHint', { locale: currentLocale === 'en' ? t('settings.languageEnglish') : t('settings.languageSimplifiedChinese') }) }}
             </p>
           </section>
 
-          <section v-else-if="step === 1" class="onboarding-section onboarding-chip-grid">
+          <section v-else-if="currentStep === 'project'" class="onboarding-section onboarding-project">
+            <div class="onboarding-project__notice">
+              <p>{{ t('onboarding.projectNotice') }}</p>
+              <p class="onboarding-project__recommendation">{{ t('onboarding.projectDownloadHint') }}</p>
+            </div>
+
+            <a
+              class="onboarding-project__repository"
+              :href="projectRepositoryUrl"
+              :aria-label="t('onboarding.projectVisitRepository')"
+              :title="projectRepositoryUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+              @click.prevent="openProjectUrl(projectRepositoryUrl)"
+            >
+              <n-icon class="onboarding-project__repository-icon" :component="LogoGithub" size="26" />
+              <span class="onboarding-project__repository-copy">
+                <span class="onboarding-project__label">{{ t('onboarding.projectRepositoryLabel') }}</span>
+                <span class="onboarding-project__address">github.com/pymss-project/pymss-studio</span>
+              </span>
+              <n-icon class="onboarding-project__open-icon" :component="OpenOutline" size="18" />
+            </a>
+          </section>
+
+          <section v-else-if="currentStep === 'theme'" class="onboarding-section onboarding-chip-grid">
             <button
               v-for="item in themeModeOptions"
               :key="item.value"
@@ -371,7 +418,7 @@ onMounted(() => {
             </button>
           </section>
 
-          <section v-else-if="step === 2" class="onboarding-section onboarding-accent-grid">
+          <section v-else-if="currentStep === 'accent'" class="onboarding-section onboarding-accent-grid">
             <button
               v-for="accent in accentOptions"
               :key="accent.value"
@@ -392,7 +439,7 @@ onMounted(() => {
             </button>
           </section>
 
-          <section v-else-if="step === dataDirStepIndex" class="onboarding-section">
+          <section v-else-if="currentStep === 'dataDir'" class="onboarding-section">
             <div class="onboarding-path-card">
               <span>{{ t('onboarding.currentModelDir') }}</span>
               <code :title="modelDir">{{ modelDir }}</code>
@@ -415,7 +462,7 @@ onMounted(() => {
             </div>
           </section>
 
-          <section v-else class="onboarding-section onboarding-runtime-section">
+          <section v-else-if="currentStep === 'runtime'" class="onboarding-section onboarding-runtime-section">
             <div v-if="runtimeChecking" class="onboarding-runtime-locked">
               <n-spin size="small" />
               <div class="onboarding-runtime-locked__copy">
@@ -463,7 +510,6 @@ onMounted(() => {
                   { label: t('onboarding.runtimeMirrorPypi'), value: 'pypi' },
                 ]"
               />
-              <span class="onboarding-runtime-mirror__hint">{{ t('onboarding.runtimeMirrorHint') }}</span>
             </div>
 
             <p class="onboarding-hint">
@@ -471,10 +517,6 @@ onMounted(() => {
               <template v-if="selectedBackendInstalled">
                 <br />
                 <span>{{ t('onboarding.runtimeAlreadyReady') }}</span>
-              </template>
-              <template v-else>
-                <br />
-                <span>{{ t('onboarding.runtimeSizeHint', { size: selectedBackendSize }) }}</span>
               </template>
             </p>
           </section>
@@ -496,7 +538,7 @@ onMounted(() => {
             {{ t('onboarding.complete') }}
           </n-button>
           <n-button v-else type="primary" size="large" :disabled="!canGoNext" @click="nextStep">
-            {{ step === totalSteps - 1 ? t('onboarding.complete') : t('common.next') }}
+            {{ currentStep === 'project' ? t('onboarding.projectContinue') : t('common.next') }}
           </n-button>
         </footer>
       </section>
@@ -840,6 +882,101 @@ onMounted(() => {
   gap: 14px;
 }
 
+.onboarding-project {
+  gap: 24px;
+}
+
+.onboarding-card--project .onboarding-content__head h1 {
+  font-size: 28px;
+  line-height: 1.45;
+  letter-spacing: -0.015em;
+}
+
+.onboarding-project__notice p {
+  margin: 0;
+  color: var(--on-surface-muted);
+  font-size: 14px;
+  line-height: 1.9;
+}
+
+.onboarding-project__notice .onboarding-project__recommendation {
+  margin-top: 12px;
+  color: var(--on-surface);
+  font-weight: 600;
+}
+
+.onboarding-project__repository {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--outline) 80%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-2) 55%, var(--surface-1));
+  color: var(--on-surface);
+  text-decoration: none;
+  transition: border-color 180ms ease, background 180ms ease;
+}
+
+.onboarding-project__repository:hover {
+  border-color: var(--primary-border);
+  background: color-mix(in srgb, var(--primary-softer) 45%, var(--surface-2));
+}
+
+.onboarding-project__repository:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 3px;
+}
+
+.onboarding-project__repository-copy {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.onboarding-project__label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.onboarding-project__address {
+  color: var(--on-surface-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.onboarding-project__repository-icon {
+  color: var(--primary-strong);
+}
+
+.onboarding-project__open-icon {
+  color: var(--on-surface-muted);
+}
+
+.onboarding-project__repository:hover .onboarding-project__address,
+.onboarding-project__repository:hover .onboarding-project__open-icon {
+  color: var(--primary-strong);
+}
+
+@media (max-height: 640px) {
+  .onboarding-card--project .onboarding-content {
+    gap: 16px;
+    padding: 24px 24px 20px;
+  }
+
+  .onboarding-project {
+    gap: 18px;
+  }
+
+  .onboarding-project__notice p {
+    font-size: 13px;
+    line-height: 1.7;
+  }
+}
+
 .onboarding-chip-grid {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -1169,14 +1306,10 @@ onMounted(() => {
 
 .onboarding-runtime-mirror {
   max-width: 260px;
-  display: grid;
-  gap: 6px;
 }
 
-.onboarding-runtime-mirror__hint {
-  color: var(--on-surface-muted);
-  font-size: 11px;
-  line-height: 1.45;
+.onboarding-runtime-section > .onboarding-hint {
+  margin: 0;
 }
 
 .onboarding-runtime-locked {
