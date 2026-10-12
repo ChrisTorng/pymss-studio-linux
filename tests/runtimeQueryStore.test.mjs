@@ -36,6 +36,7 @@ const vite = await createServer({
 after(() => vite.close())
 
 const { useAppStore } = await vite.ssrLoadModule('/src/stores/app.ts')
+const { buildDiagnosticChecks } = await vite.ssrLoadModule('/src/utils/diagnostics.ts')
 const { useSettingsStore } = await vite.ssrLoadModule('/src/stores/settings.ts')
 const { __setRegisterWorkerEventsForTest } = await vite.ssrLoadModule('/src/utils/events.ts')
 
@@ -1006,4 +1007,65 @@ test('a core-update completion received before start ACK releases the queue', as
   await within(update, 'core update ACK after early completion')
   await within(app.checkRuntimeInfo(), 'query after early completion')
   assert.equal(app.runtimeCoreUpdateTaskId, null)
+})
+
+
+test('business task failures leave environment diagnostics healthy', () => {
+  const app = appStore(async () => undefined)
+  app.envInfo = { pythonVersion: '3.12.10', pymssAvailable: true, torchAvailable: true }
+  app.runtimeInfo = { ready: true }
+  app.handleWorkerEvent({ type: 'error', taskId: 'bad-input', payload: { code: 'INVALID_INPUT', message: 'Input file does not exist' } })
+
+  assert.equal(app.lastError, 'Input file does not exist')
+  assert.equal(app.envError, null)
+  const checks = buildDiagnosticChecks({ env: app.envInfo, runtime: app.runtimeInfo, envError: app.envError, connection: 'connected', isMac: false })
+  assert.equal(checks.find(check => check.key === 'runtime').state, 'ok')
+})
+
+test('a direct environment failure remains separate from later task failures and clears on recovery', async () => {
+  let failing = true
+  const env = { pythonVersion: '3.12.10', pymssAvailable: true, torchAvailable: true }
+  const app = appStore(async command => {
+    assert.equal(command, 'get_env_info')
+    if (failing) throw new Error('Interpreter failed to start')
+    return env
+  })
+  await assert.rejects(app.checkEnv(), /Interpreter failed to start/)
+  assert.equal(app.envError, 'Interpreter failed to start')
+
+  app.handleWorkerEvent({ type: 'error', taskId: 'bad-input', payload: { code: 'INVALID_INPUT', message: 'Input file does not exist' } })
+  assert.equal(app.lastError, 'Input file does not exist')
+  assert.equal(app.envError, 'Interpreter failed to start')
+  failing = false
+  await app.checkEnv()
+  assert.equal(app.envError, null)
+  assert.deepEqual(app.envInfo, env)
+})
+
+test('background environment failures clear only when the matching request recovers', async () => {
+  const ids = []
+  const app = appStore(async (command, args) => {
+    assert.equal(command, 'start_env_check')
+    ids.push(args.requestId)
+  })
+  await app.checkEnvInBackground()
+  app.handleWorkerEvent({ type: 'error', requestId: ids[0], payload: { code: 'ENV_CHECK_FAILED', message: 'Environment import failed' } })
+  assert.equal(app.envError, 'Environment import failed')
+
+  await app.checkEnvInBackground()
+  assert.equal(app.envError, null)
+  app.handleWorkerEvent({ type: 'error', requestId: ids[0], payload: { code: 'ENV_CHECK_FAILED', message: 'Obsolete failure' } })
+  assert.equal(app.envError, null)
+  assert.equal(app.envLoading, true)
+  app.handleWorkerEvent({ type: 'env_info', requestId: ids[1], payload: { pythonVersion: '3.12.10' } })
+  assert.equal(app.envError, null)
+  assert.equal(app.envLoading, false)
+})
+
+test('background environment listener failures remain visible in environment diagnostics', async () => {
+  const app = appStore(async () => assert.fail('no worker request should be sent'))
+  __setRegisterWorkerEventsForTest(async () => { throw new Error('Listener registration failed') })
+  await assert.rejects(app.checkEnvInBackground(), /Listener registration failed/)
+  assert.equal(app.envError, 'Listener registration failed')
+  assert.equal(app.envLoading, false)
 })

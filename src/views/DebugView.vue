@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
 import { useMessage } from 'naive-ui'
+import { useRouter } from 'vue-router'
 import {
   AlertCircleOutline,
   CheckmarkCircleOutline,
@@ -17,24 +18,33 @@ import {
   TimeOutline,
   WarningOutline,
 } from '@vicons/ionicons5'
-import { useAppStore, type DiagnosticLevel } from '@/stores/app'
+import { useAppStore } from '@/stores/app'
 import { useSettingsStore } from '@/stores/settings'
 import { useTaskStore } from '@/stores/task'
 import { useModelStore } from '@/stores/model'
+import { useWorkflowStore } from '@/stores/workflow'
+import { useOptionalRuntimePackage } from '@/features/audio-tools/optionalRuntimePackage'
+import { buildDiagnosticChecks, isDiagnosticIssueEvent, summarizeDiagnosticChecks, type DiagnosticState } from '@/utils/diagnostics'
+import { detectRuntimePlatform } from '@/utils/runtime'
+import { isTauriRuntime } from '@/utils/appStore'
+import TaskLogConsole from '@/components/TaskLogConsole.vue'
 import { formatBytes } from '@/utils/format'
 
 const { t } = useI18n()
 const message = useMessage()
+const router = useRouter()
 const app = useAppStore()
 const settings = useSettingsStore()
 const task = useTaskStore()
 const modelStore = useModelStore()
+const workflow = useWorkflowStore()
+const funAsr = useOptionalRuntimePackage('funasr')
 
 const { developerMode, dataRoot, modelDir, outputDir, settingsDir, editorProjectsDir, logsDir, tempDir, defaultDevice, downloadSource, downloadMethod, maxConcurrentSeparations, updateEndpointOverride } = storeToRefs(settings)
 const { activeWorkerTasks, runningTasks } = storeToRefs(task)
 const { downloadTasks } = storeToRefs(modelStore)
 
-type DebugTab = 'overview' | 'runtime' | 'models' | 'events' | 'logs' | 'paths'
+type DebugTab = 'overview' | 'runtime' | 'activity' | 'models' | 'events' | 'logs' | 'paths'
 type CatalogEditMode = 'simple' | 'advanced'
 type DebugLogLevelFilter = 'all' | 'error' | 'warn' | 'info' | 'debug'
 type DebugLogCategoryFilter = 'all' | 'issues' | 'traceback' | 'pymss' | 'worker' | 'app' | 'runtime' | 'store' | 'other'
@@ -151,6 +161,7 @@ type ParsedDebugLogLine = {
 
 const activeTab = ref<DebugTab>('overview')
 const debugCatalogLoading = ref(false)
+const debugCatalogError = ref('')
 const debugCatalogSaving = ref(false)
 const debugCatalogInfo = ref<DebugCatalogInfo | null>(null)
 const debugCatalogText = ref('')
@@ -169,6 +180,7 @@ const debugConfigText = ref('')
 const workerEventDialogVisible = ref(false)
 const selectedWorkerEvent = ref<any | null>(null)
 const runtimeDebugLoading = ref(false)
+const runtimeDebugError = ref('')
 const runtimeDebugSaving = ref('')
 const runtimeDebugInfo = ref<DebugRuntimePointers | null>(null)
 const runtimeDebugEditorVisible = ref(false)
@@ -192,12 +204,46 @@ const debugLogCategory = ref<DebugLogCategoryFilter>('all')
 const debugLogTask = ref('all')
 const expandedDebugLogLines = ref<Record<string, boolean>>({})
 
-const diagnostics = computed(() => app.diagnostics)
+const checkingDiagnostics = ref(false)
+const optionalChecking = ref(false)
+const lastCheckedAt = ref<number | null>(null)
+const activityLoadError = ref('')
+const eventQuery = ref('')
+const eventIssuesOnly = ref(false)
+const debugLogError = ref('')
+const executionLogVisible = ref(false)
+const executionLogTaskId = ref('')
+const executionLogTask = computed(() => task.tasks.find(item => item.id === executionLogTaskId.value))
+const isMac = computed(() => detectRuntimePlatform(app.runtimeInfo).isMac)
+const diagnostics = computed(() => buildDiagnosticChecks({
+  env: app.envInfo, runtime: app.runtimeInfo, envError: app.envError, runtimeError: app.runtimeInfoError,
+  connection: app.workerEventConnectionStatus, connectionError: app.workerEventConnectionError,
+  optionalPackage: funAsr.status.value, optionalError: funAsr.error.value, isMac: isMac.value,
+}))
+const diagnosticSummary = computed(() => summarizeDiagnosticChecks(diagnostics.value))
+const diagnosticStateLabels: Record<DiagnosticState, string> = {
+  ok: 'debug.stateOk', warn: 'debug.stateWarning', error: 'debug.stateError', unknown: 'debug.stateUnknown', optional: 'debug.stateOptional',
+}
+const diagnosticGroups = computed(() => [
+  { key: 'runtime', title: t('debug.environment'), hint: t('debug.groupRuntimeHint'), icon: PulseOutline },
+  { key: 'capabilities', title: t('debug.capabilities'), hint: t('debug.groupCapabilitiesHint'), icon: CheckmarkCircleOutline },
+  { key: 'connection', title: t('debug.connection'), hint: t('debug.groupConnectionHint'), icon: TerminalOutline },
+].map(group => ({ ...group, checks: diagnostics.value.filter(check => check.group === group.key) })))
+const diagnosticBusy = computed(() => checkingDiagnostics.value || optionalChecking.value || app.envLoading || app.runtimeInfoLoading)
+const failedTasks = computed(() => [...task.failedTasks].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 8))
 const env = computed(() => app.envInfo)
-const recentWorkerEventGroups = computed(() => groupWorkerEvents(app.workerEvents as DebugWorkerEvent[]).slice(0, 40))
+const workerEventGroups = computed(() => groupWorkerEvents(app.workerEvents as DebugWorkerEvent[]))
+const recentWorkerEventGroups = computed(() => {
+  const query = eventQuery.value.trim().toLowerCase()
+  return workerEventGroups.value.filter(group => {
+    if (eventIssuesOnly.value && !group.events.some(isDiagnosticIssueEvent)) return false
+    return !query || [group.taskId, ...Object.keys(group.typeCounts), ...group.events.map(event => formatPayload(event.payload))].join('\n').toLowerCase().includes(query)
+  }).slice(0, 80)
+})
 const debugTabs = computed(() => [
   { key: 'overview', label: t('debug.tabOverview') },
   { key: 'runtime', label: t('debug.tabRuntime') },
+  { key: 'activity', label: t('debug.tabActivity') },
   { key: 'models', label: t('debug.tabModels') },
   { key: 'events', label: t('debug.tabEvents') },
   { key: 'logs', label: t('debug.tabLogs') },
@@ -475,6 +521,9 @@ const runningDownloadTasks = computed(() => Object.values(downloadTasks.value).f
 const runtimeDevice = computed(() => settings.getRuntimeDeviceConfig(app.envInfo))
 const cudaDevices = computed(() => env.value?.cudaDevices || [])
 const runtimeRows = computed(() => [
+  { label: t('settings.workerVersion'), value: env.value?.workerVersion },
+  { label: 'pymss-core', value: app.runtimeInfo?.pymssCoreVersion },
+  { label: t('debug.runtimeManifest'), value: app.runtimeInfo?.manifestVersion },
   { label: t('debug.defaultDevice'), value: defaultDevice.value },
   { label: t('debug.resolvedDevice'), value: `${runtimeDevice.value.device} [${runtimeDevice.value.deviceIds.join(', ')}]` },
   { label: t('debug.downloadSource'), value: downloadSource.value },
@@ -604,6 +653,7 @@ const debugLogCategoryOptions = computed(() => [
 ] as Array<{ label: string; value: DebugLogCategoryFilter }>)
 const debugLogTaskOptions = computed(() => {
   const tasks = Array.from(new Set(parsedDebugLogLines.value.map((line) => line.taskId).filter(Boolean))).sort()
+  if (debugLogTask.value !== 'all' && !tasks.includes(debugLogTask.value)) tasks.unshift(debugLogTask.value)
   return [
     { label: t('debug.logFilterAllTasks'), value: 'all' },
     ...tasks.map((taskId) => ({ label: shortTaskId(taskId), value: taskId })),
@@ -632,16 +682,16 @@ const debugLogIssueCounts = computed(() => {
   return { errors, warnings, tracebacks }
 })
 const statusCards = computed(() => [
-  { label: t('debug.envStatus'), value: app.envReady ? t('debug.ready') : t('debug.needsAttention'), tone: app.envReady ? 'ok' : 'warn' },
-  { label: t('debug.activeWorkerTasks'), value: String(activeWorkerTasks.value.length), tone: activeWorkerTasks.value.length ? 'warn' : 'ok' },
-  { label: t('debug.runningTasks'), value: String(runningTasks.value.length), tone: runningTasks.value.length ? 'warn' : 'ok' },
-  { label: t('debug.downloadingModels'), value: String(runningDownloadTasks.value.length), tone: runningDownloadTasks.value.length ? 'warn' : 'ok' },
+  { label: t('debug.envStatus'), value: t(diagnosticStateLabels[diagnosticSummary.value.state]), tone: diagnosticSummary.value.state, detail: t('debug.checkCounts', { ok: diagnosticSummary.value.ok, total: diagnostics.value.length }), tab: 'overview' as DebugTab },
+  { label: t('debug.activeWorkerTasks'), value: String(activeWorkerTasks.value.length), tone: 'neutral', detail: t('debug.queuedCount', { count: task.queuedTasks.length }), tab: 'activity' as DebugTab },
+  { label: t('debug.runningTasks'), value: String(runningTasks.value.length), tone: 'neutral', detail: t('debug.workflowCount', { count: runningTasks.value.filter(item => item.runConfig?.runMode === 'workflow').length }), tab: 'activity' as DebugTab },
+  { label: t('debug.downloadingModels'), value: String(runningDownloadTasks.value.length), tone: 'neutral', detail: t('debug.openActivity'), tab: 'activity' as DebugTab },
 ])
 
-function diagnosticIcon(level: DiagnosticLevel) {
+function diagnosticIcon(level: DiagnosticState) {
   if (level === 'ok') return CheckmarkCircleOutline
   if (level === 'warn') return WarningOutline
-  return AlertCircleOutline
+  return level === 'error' ? AlertCircleOutline : InformationCircleOutline
 }
 
 function eventTime(value: unknown) {
@@ -744,6 +794,7 @@ function workerEventGroupPayload(group: DebugWorkerEventGroup | null) {
     latestType: group.latestType,
     typeCounts: group.typeCounts,
     latestPayload: group.latestPayload,
+    events: [...group.events].reverse(),
   })
 }
 
@@ -757,12 +808,94 @@ function formatPayload(payload: unknown) {
 }
 
 async function checkEnv() {
-  if (!developerMode.value) return
+  if (!developerMode.value || diagnosticBusy.value) return
+  checkingDiagnostics.value = true
   try {
-    await app.checkEnv()
-    message.success(t('debug.envCheckDone'))
+    const results = await Promise.allSettled([app.checkRuntimeInfo(), app.checkEnv()])
+    await refreshOptionalDependency()
+    lastCheckedAt.value = Date.now()
+    if (results.some(result => result.status === 'rejected') || (!isMac.value && funAsr.error.value)) message.warning(t('debug.checkPartialFailure'))
+    else message.success(t('debug.envCheckDone'))
+    if (activeTab.value === 'runtime') await loadRuntimeDebugPointers()
+  } finally {
+    checkingDiagnostics.value = false
+  }
+}
+
+async function refreshOptionalDependency() {
+  if (isMac.value || !isTauriRuntime() || optionalChecking.value) return
+  optionalChecking.value = true
+  try { await funAsr.refresh() }
+  finally { optionalChecking.value = false }
+}
+
+function openDiagnosticAction(action: 'runtime' | 'tools' | 'events') {
+  if (action === 'events') activeTab.value = 'events'
+  else if (action === 'runtime') void router.push({ name: 'settings', query: { section: 'runtime' } })
+  else void router.push({ name: 'tools' })
+}
+
+async function reconnectWorkerEvents() {
+  if (!isTauriRuntime() || app.workerEventConnectionStatus === 'connecting') return
+  try {
+    const { connectWorkerEvents } = await import('@/utils/events')
+    await connectWorkerEvents(app)
   } catch (error) {
     message.error(error instanceof Error ? error.message : String(error))
+  }
+}
+
+async function copyText(text: string, success: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    message.success(t(success))
+  } catch (error) {
+    message.error(error instanceof Error ? error.message : String(error))
+  }
+}
+
+function copyDiagnosticSummary() {
+  const content = [
+    `Pymss Studio ${app.buildInfoVersion || '-'} (${app.buildInfoVariant || '-'})`,
+    `${t('debug.envStatus')}: ${t(diagnosticStateLabels[diagnosticSummary.value.state])}`,
+    `${t('debug.lastChecked')}: ${lastCheckedAt.value ? new Date(lastCheckedAt.value).toISOString() : t('debug.stateUnknown')}`,
+    ...diagnostics.value.map(check => `${check.label.startsWith('debug.') ? t(check.label) : check.label}: ${t(diagnosticStateLabels[check.state])}${check.value ? ` · ${check.value}` : ''}${check.detail && check.state !== 'ok' ? `\n  ${check.detail.replace(/\n/g, '\n  ')}` : ''}`),
+    `${t('debug.activeWorkerTasks')}: ${activeWorkerTasks.value.length}; ${t('debug.queuedCount', { count: task.queuedTasks.length })}`,
+    `${t('debug.workflowTasks')}: ${runningTasks.value.filter(item => item.runConfig?.runMode === 'workflow').length}`,
+  ].join('\n')
+  void copyText(content, 'debug.summaryCopied')
+}
+
+async function showTaskLogs(taskId: string) {
+  clearDebugLogFilters()
+  debugLogTask.value = taskId
+  activeTab.value = 'logs'
+  await loadDebugLog()
+}
+
+function showExecutionLogs(taskId: string) {
+  executionLogTaskId.value = taskId
+  executionLogVisible.value = true
+}
+
+const executionLogText = computed(() => [
+  ...(executionLogTask.value?.logs || []),
+  ...Object.entries(executionLogTask.value?.nodeLogs || {}).flatMap(([id, lines]) => [`[node:${id}]`, ...lines]),
+].join('\n'))
+
+const taskStatusKeys: Record<string, string> = {
+  queued: 'tasks.statusQueued', preparing: 'tasks.statusPreparing', validating_input: 'tasks.statusValidatingInput',
+  downloading_model: 'tasks.statusCheckingModel', ensuring_model: 'tasks.statusCheckingModel', loading_model: 'tasks.statusLoadingModel',
+  separating: 'tasks.statusSeparating', writing_output: 'tasks.statusWritingOutput', done: 'tasks.statusDone', failed: 'tasks.statusFailed', cancelled: 'tasks.statusCancelled',
+}
+
+async function loadActivity() {
+  activityLoadError.value = ''
+  try {
+    await workflow.initialize()
+    await workflow.refreshEditorWindows()
+  } catch (error) {
+    activityLoadError.value = error instanceof Error ? error.message : String(error)
   }
 }
 
@@ -773,12 +906,13 @@ function openWorkerEvent(group: DebugWorkerEventGroup) {
 
 async function loadDebugCatalog() {
   debugCatalogLoading.value = true
+  debugCatalogError.value = ''
   try {
     const result = await invoke<DebugCatalogInfo>('debug_catalog_info')
     debugCatalogInfo.value = result
     setCatalogEditor(catalogForEditor(result))
   } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error))
+    debugCatalogError.value = error instanceof Error ? error.message : String(error)
   } finally {
     debugCatalogLoading.value = false
   }
@@ -878,8 +1012,9 @@ async function scrollDebugLogToLatest() {
 }
 
 async function loadDebugLog() {
-  if (!developerMode.value) return
+  if (!developerMode.value || debugLogLoading.value) return
   debugLogLoading.value = true
+  debugLogError.value = ''
   try {
     const [info, content] = await Promise.all([
       invoke<DebugLogInfo>('debug_log_info'),
@@ -889,9 +1024,7 @@ async function loadDebugLog() {
     debugLogContent.value = content
     await scrollDebugLogToLatest()
   } catch (error) {
-    debugLogInfo.value = null
-    debugLogContent.value = null
-    message.error(error instanceof Error ? error.message : String(error))
+    debugLogError.value = error instanceof Error ? error.message : String(error)
   } finally {
     debugLogLoading.value = false
   }
@@ -913,7 +1046,7 @@ async function clearDebugLog() {
 }
 
 async function copyDebugLog() {
-  const content = debugLogContent.value?.content || ''
+  const content = filteredDebugLogLines.value.map(line => line.raw).join('\n')
   if (!content) return
   try {
     await navigator.clipboard.writeText(content)
@@ -953,11 +1086,12 @@ async function loadRuntimeDebugPointers() {
     return
   }
   runtimeDebugLoading.value = true
+  runtimeDebugError.value = ''
   try {
     const info = await invoke<DebugRuntimePointers>('debug_runtime_pointers')
     setRuntimeDebugInfo(info)
   } catch (error) {
-    message.error(error instanceof Error ? error.message : String(error))
+    runtimeDebugError.value = error instanceof Error ? error.message : String(error)
   } finally {
     runtimeDebugLoading.value = false
   }
@@ -1286,11 +1420,17 @@ async function overrideActiveRuntimePointer() {
 function loadDebugPageData() {
   if (!developerMode.value) return
   if (!app.envLoading && !app.envInfo) app.checkEnvInBackground().catch(() => {})
-  app.checkRuntimeInfo().catch(() => {})
-  loadRuntimeDebugPointers().catch(() => {})
-  loadDebugLog().catch(() => {})
-  if (!modelStore.models.length) modelStore.loadModels().catch(() => {})
-  loadDebugCatalog().catch(() => {})
+  app.ensureRuntimeInfo().then(() => refreshOptionalDependency()).catch(() => {})
+  loadTabData(activeTab.value)
+}
+
+function loadTabData(tab: DebugTab) {
+  if (!developerMode.value || !isTauriRuntime()) return
+  if (tab === 'runtime' && !runtimeDebugInfo.value && !runtimeDebugLoading.value) void loadRuntimeDebugPointers()
+  if (tab === 'logs' && !debugLogContent.value && !debugLogLoading.value) void loadDebugLog()
+  if ((tab === 'models' || tab === 'paths') && !debugCatalogInfo.value && !debugCatalogLoading.value) void loadDebugCatalog()
+  if (tab === 'models' && !modelStore.models.length) modelStore.loadModels().catch(() => {})
+  if (tab === 'activity') void loadActivity()
 }
 
 onMounted(() => {
@@ -1315,6 +1455,7 @@ watch(currentRuntimeOverrideDefaults, () => {
 }, { immediate: true })
 
 watch(activeTab, (tab) => {
+  loadTabData(tab)
   if (tab === 'logs') scrollDebugLogToLatest().catch(() => {})
 })
 
@@ -1328,6 +1469,7 @@ watch(developerMode, (enabled) => {
     selectedWorkerEvent.value = null
     runtimeDebugEditorVisible.value = false
     catalogModelDialogVisible.value = false
+    executionLogVisible.value = false
     runtimeDebugInfo.value = null
     debugLogInfo.value = null
     debugLogContent.value = null
@@ -1342,10 +1484,14 @@ watch(developerMode, (enabled) => {
         <h1>{{ t('debug.title') }}</h1>
         <p>{{ t('debug.subtitle') }}</p>
       </div>
-      <n-button type="primary" secondary :loading="app.envLoading" @click="checkEnv">
-        <template #icon><n-icon :component="RefreshOutline" /></template>
-        {{ app.envLoading ? t('settings.checkingEnv') : t('settings.checkEnv') }}
-      </n-button>
+      <div class="debug-header-actions">
+        <n-button secondary :disabled="!developerMode || diagnosticBusy" @click="copyDiagnosticSummary">{{ t('debug.copySummary') }}</n-button>
+        <n-button secondary :disabled="!developerMode" :loading="debugLogReportLoading" @click="createDebugLogReport">{{ t('debug.createReport') }}</n-button>
+        <n-button type="primary" :disabled="!developerMode || diagnosticBusy" :loading="diagnosticBusy" @click="checkEnv">
+          <template #icon><n-icon :component="RefreshOutline" /></template>
+          {{ diagnosticBusy ? t('settings.checkingEnv') : t('settings.checkEnv') }}
+        </n-button>
+      </div>
     </div>
 
     <div v-if="!developerMode" class="debug-page__lock" aria-live="polite">
@@ -1361,13 +1507,14 @@ watch(developerMode, (enabled) => {
     </div>
 
     <div class="debug-page__content" :class="{ 'debug-page__content--locked': !developerMode }" :inert="!developerMode || undefined">
-    <nav class="debug-tabs" aria-label="Debug sections">
+    <nav class="debug-tabs" :aria-label="t('debug.sectionNavigation')">
       <button
         v-for="tab in debugTabs"
         :key="tab.key"
         type="button"
         class="debug-tab"
         :class="{ 'debug-tab--active': activeTab === tab.key }"
+        :aria-current="activeTab === tab.key ? 'page' : undefined"
         @click="activeTab = tab.key"
       >
         {{ tab.label }}
@@ -1375,33 +1522,47 @@ watch(developerMode, (enabled) => {
     </nav>
 
     <section v-if="activeTab === 'overview'" class="debug-status-grid">
-      <article v-for="item in statusCards" :key="item.label" class="debug-status-card" :class="`debug-status-card--${item.tone}`">
+      <button v-for="item in statusCards" :key="item.label" type="button" class="debug-status-card" :class="`debug-status-card--${item.tone}`" @click="activeTab = item.tab">
         <span>{{ item.label }}</span>
         <strong>{{ item.value }}</strong>
-      </article>
+        <small>{{ item.detail }}</small>
+      </button>
+    </section>
+
+    <div v-if="activeTab === 'overview'" class="debug-check-status" aria-live="polite">
+      <span>{{ diagnosticBusy ? t('settings.checkingEnv') : lastCheckedAt ? `${t('debug.lastChecked')} ${eventTime(new Date(lastCheckedAt).toISOString())}` : t('debug.cachedSnapshot') }}</span>
+      <span>{{ t('debug.issueCounts', { errors: diagnosticSummary.error, warnings: diagnosticSummary.warn, unknown: diagnosticSummary.unknown }) }}</span>
+    </div>
+
+    <section v-if="activeTab === 'overview'" class="debug-health-grid" :aria-busy="diagnosticBusy">
+      <n-card v-for="group in diagnosticGroups" :key="group.key" class="debug-card" :bordered="true" size="small">
+        <template #header>
+          <div class="debug-section-title">
+            <n-icon :component="group.icon" />
+            <span>{{ group.title }}</span>
+          </div>
+        </template>
+        <p class="debug-group-hint">{{ group.hint }}</p>
+        <div class="diagnostic-list">
+          <div v-for="item in group.checks" :key="item.key" class="diagnostic-row" :class="`diagnostic-row--${item.state}`">
+            <n-icon :component="diagnosticIcon(item.state)" />
+            <div class="diagnostic-row__main">
+              <div class="diagnostic-row__head">
+                <strong>{{ item.label.startsWith('debug.') ? t(item.label) : item.label }}</strong>
+                <span class="diagnostic-state">{{ item.state === 'unknown' && diagnosticBusy ? t('settings.checkingEnv') : t(diagnosticStateLabels[item.state]) }}</span>
+              </div>
+              <span v-if="item.value">{{ item.value }}</span>
+              <code v-if="item.detail">{{ item.detail }}</code>
+              <p v-if="item.hint && ['warn', 'error', 'optional'].includes(item.state)">{{ t(item.hint) }}</p>
+              <button v-if="['warn', 'error', 'optional'].includes(item.state) || item.detail && item.state === 'unknown'" type="button" class="diagnostic-action" @click="openDiagnosticAction(item.action)">{{ t(item.action === 'runtime' ? 'debug.manageRuntime' : item.action === 'tools' ? 'debug.openTools' : 'debug.tabEvents') }}</button>
+              <n-button v-if="item.key === 'connection' && item.state !== 'ok' && isTauriRuntime()" size="tiny" tertiary :loading="app.workerEventConnectionStatus === 'connecting'" :disabled="app.workerEventConnectionStatus === 'connecting'" @click="reconnectWorkerEvents">{{ t('debug.reconnectEvents') }}</n-button>
+            </div>
+          </div>
+        </div>
+      </n-card>
     </section>
 
     <section v-if="activeTab === 'overview'" class="debug-grid debug-grid--top">
-      <n-card class="debug-card" :bordered="true" size="small">
-        <template #header>
-          <div class="debug-section-title">
-            <n-icon :component="PulseOutline" />
-            <span>{{ t('debug.environment') }}</span>
-          </div>
-        </template>
-        <div class="diagnostic-list">
-          <div v-for="item in diagnostics" :key="item.key" class="diagnostic-row" :class="`diagnostic-row--${item.level}`">
-            <n-icon :component="diagnosticIcon(item.level)" />
-            <div class="diagnostic-row__main">
-              <strong>{{ item.label }}</strong>
-              <span>{{ item.value }}</span>
-              <code v-if="item.detail">{{ item.detail }}</code>
-            </div>
-          </div>
-          <n-empty v-if="!diagnostics.length" :description="t('debug.envNotChecked')" />
-        </div>
-      </n-card>
-
       <n-card class="debug-card" :bordered="true" size="small">
         <template #header>
           <div class="debug-section-title">
@@ -1480,6 +1641,7 @@ watch(developerMode, (enabled) => {
         <div v-for="row in pathRows" :key="row.label" class="path-debug-row">
           <span>{{ row.label }}</span>
           <code :title="row.value || '-'">{{ row.value || '-' }}</code>
+          <n-button size="tiny" tertiary :disabled="!row.value" @click="copyText(row.value, 'debug.pathCopied')">{{ t('common.copy') }}</n-button>
           <n-button size="tiny" secondary :disabled="!row.value" @click="revealPath(row.value)">
             {{ t('common.open') }}
           </n-button>
@@ -1494,11 +1656,12 @@ watch(developerMode, (enabled) => {
             <n-icon :component="FolderOpenOutline" />
             <span>{{ t('debug.runtimePageTitle') }}</span>
           </div>
-          <n-button size="tiny" secondary :loading="runtimeDebugLoading" @click="loadRuntimeDebugPointers">
+          <n-button size="tiny" secondary :loading="runtimeDebugLoading || diagnosticBusy" :disabled="runtimeDebugLoading || diagnosticBusy" @click="checkEnv">
             {{ t('common.refresh') }}
           </n-button>
         </div>
       </template>
+      <n-alert v-if="runtimeDebugError" type="error" class="debug-log-read-error">{{ runtimeDebugError }}</n-alert>
       <section class="runtime-status-panel">
         <div class="runtime-panel-copy">
           <strong>{{ t('debug.runtimeCurrentTitle') }}</strong>
@@ -1680,6 +1843,7 @@ watch(developerMode, (enabled) => {
             <span>{{ t('debug.debugCatalogTitle') }}</span>
           </div>
         </template>
+        <n-alert v-if="debugCatalogError" type="error" class="debug-log-read-error">{{ debugCatalogError }}</n-alert>
         <div class="debug-editor-meta">
           <div class="kv-row">
             <span>{{ t('debug.debugCatalogPath') }}</span>
@@ -1873,7 +2037,8 @@ watch(developerMode, (enabled) => {
       </n-card>
     </section>
 
-    <section v-if="activeTab === 'overview'" class="debug-grid">
+    <section v-if="activeTab === 'activity'" class="debug-grid debug-activity-grid">
+      <n-alert v-if="activityLoadError" class="debug-activity-error" type="error">{{ activityLoadError }}</n-alert>
       <n-card class="debug-card" :bordered="true" size="small">
         <template #header>
           <div class="debug-section-title">
@@ -1882,10 +2047,23 @@ watch(developerMode, (enabled) => {
           </div>
         </template>
         <div class="task-debug-list">
-          <div v-for="item in runningTasks" :key="item.id" class="task-debug-row">
-            <strong>{{ shortTaskId(item.id) }}</strong>
-            <span>{{ item.status }}</span>
-            <code :title="item.input">{{ item.model }}</code>
+          <div v-for="item in runningTasks" :key="item.id" class="debug-task-entry">
+            <div class="debug-task-entry__head">
+              <strong>{{ item.runConfig?.workflowName || item.model }}</strong>
+              <span>{{ t(taskStatusKeys[item.status]) }} · {{ Math.round(item.progress || 0) }}%</span>
+            </div>
+            <div class="debug-task-entry__meta">
+              <span>{{ t(item.runConfig?.runMode === 'workflow' ? 'debug.workflowTasks' : 'debug.modelTask') }}</span>
+              <code :title="item.id">{{ shortTaskId(item.id) }}</code>
+              <span v-if="item.batchId">{{ t('debug.batchTask') }}{{ item.batchIndex != null ? ` #${item.batchIndex + 1}` : '' }}</span>
+            </div>
+            <code class="debug-task-entry__input" :title="item.input">{{ item.input }}</code>
+            <p v-if="item.stageLabel || item.progressDetail">{{ item.stageLabel }} {{ item.progressDetail }}</p>
+            <div class="debug-task-entry__actions">
+              <n-button size="tiny" tertiary @click="showExecutionLogs(item.id)">{{ t('debug.executionLogs') }}</n-button>
+              <n-button size="tiny" tertiary @click="showTaskLogs(item.id)">{{ t('debug.taskLogs') }}</n-button>
+              <n-button size="tiny" tertiary @click="eventQuery = item.id; eventIssuesOnly = false; activeTab = 'events'">{{ t('debug.tabEvents') }}</n-button>
+            </div>
           </div>
           <n-empty v-if="!runningTasks.length" :description="t('debug.noActiveTasks')" />
         </div>
@@ -1899,15 +2077,56 @@ watch(developerMode, (enabled) => {
           </div>
         </template>
         <div class="task-debug-list">
-          <div v-for="item in Object.values(downloadTasks)" :key="item.taskId" class="task-debug-row">
-            <strong>{{ item.model }}</strong>
-            <span>{{ item.status }} · {{ item.progress }}%</span>
-            <code>{{ item.completedFiles }} / {{ item.totalFiles }}</code>
+          <div v-for="item in Object.values(downloadTasks)" :key="item.taskId" class="debug-task-entry">
+            <div class="debug-task-entry__head"><strong>{{ item.model }}</strong><span>{{ item.status }} · {{ Math.round(item.progress || 0) }}%</span></div>
+            <div class="debug-task-entry__meta"><code>{{ item.completedFiles }} / {{ item.totalFiles }}</code><code :title="item.taskId">{{ shortTaskId(item.taskId) }}</code></div>
+            <n-button size="tiny" tertiary @click="showTaskLogs(item.taskId)">{{ t('debug.taskLogs') }}</n-button>
           </div>
           <n-empty v-if="!Object.values(downloadTasks).length" :description="t('debug.noDownloadTasks')" />
         </div>
       </n-card>
+
+      <n-card class="debug-card" :bordered="true" size="small">
+        <template #header><div class="debug-section-title"><n-icon :component="AlertCircleOutline" /><span>{{ t('debug.recentFailures') }}</span></div></template>
+        <div class="task-debug-list">
+          <div v-for="item in failedTasks" :key="item.id" class="debug-task-entry">
+            <div class="debug-task-entry__head"><strong>{{ item.runConfig?.workflowName || item.model }}</strong><span>{{ new Date(item.updatedAt).toLocaleString() }}</span></div>
+            <code :title="item.id">{{ shortTaskId(item.id) }}</code>
+            <p class="debug-task-entry__error">{{ item.error || item.message }}</p>
+            <div class="debug-task-entry__actions">
+              <n-button size="tiny" tertiary @click="showExecutionLogs(item.id)">{{ t('debug.executionLogs') }}</n-button>
+              <n-button size="tiny" tertiary @click="showTaskLogs(item.id)">{{ t('debug.taskLogs') }}</n-button>
+            </div>
+          </div>
+          <n-empty v-if="!failedTasks.length" :description="t('debug.noFailures')" />
+        </div>
+      </n-card>
+
+      <n-card class="debug-card" :bordered="true" size="small">
+        <template #header><div class="runtime-card-header"><div class="debug-section-title"><n-icon :component="InformationCircleOutline" /><span>{{ t('debug.editorWindows') }}</span></div><n-button size="tiny" secondary @click="loadActivity">{{ t('common.refresh') }}</n-button></div></template>
+        <div class="task-debug-list">
+          <div v-for="editor in workflow.openedEditors" :key="editor.label" class="debug-task-entry">
+            <div class="debug-task-entry__head"><strong>{{ workflow.workflows.find(item => item.id === editor.workflowId)?.name || editor.workflowId || t('debug.unsavedWorkflow') }}</strong><span>{{ t(editor.kind === 'advanced' ? 'debug.advancedEditor' : 'debug.simpleEditor') }}</span></div>
+            <code>{{ editor.label }}</code>
+          </div>
+          <n-empty v-if="!workflow.openedEditors.length" :description="t('debug.noEditors')" />
+        </div>
+      </n-card>
     </section>
+
+    <n-modal v-model:show="executionLogVisible" preset="card" :title="t('debug.executionLogs')" class="debug-execution-log-modal" :style="{ width: 'min(960px, calc(100vw - 48px))' }">
+      <div class="worker-event-modal-meta">
+        <code>{{ executionLogTask?.id }}</code>
+        <span>{{ executionLogTask?.runConfig?.workflowName || executionLogTask?.model }}</span>
+        <n-button size="tiny" tertiary :disabled="!executionLogText" @click="copyText(executionLogText, 'debug.logCopied')">{{ t('common.copy') }}</n-button>
+      </div>
+      <p v-if="executionLogTask?.error" class="debug-execution-log-error">{{ executionLogTask.error }}</p>
+      <TaskLogConsole :lines="executionLogTask?.logs || []" />
+      <details v-for="(lines, nodeId) in executionLogTask?.nodeLogs || {}" :key="nodeId" class="debug-node-logs">
+        <summary>{{ t('debug.nodeLogs', { node: nodeId, count: lines.length }) }}</summary>
+        <TaskLogConsole :lines="lines" compact />
+      </details>
+    </n-modal>
 
     <n-card v-if="activeTab === 'events'" class="debug-card debug-card--events" :bordered="true" size="small">
       <template #header>
@@ -1916,6 +2135,11 @@ watch(developerMode, (enabled) => {
           <span>{{ t('debug.workerEvents') }}</span>
         </div>
       </template>
+      <div class="debug-event-toolbar">
+        <n-input v-model:value="eventQuery" clearable :placeholder="t('debug.eventSearch')" :input-props="{ 'aria-label': t('debug.eventSearch') }" />
+        <n-checkbox v-model:checked="eventIssuesOnly">{{ t('debug.logCategoryIssues') }}</n-checkbox>
+        <span>{{ t('debug.eventGroupCount', { shown: recentWorkerEventGroups.length, total: workerEventGroups.length }) }}</span>
+      </div>
       <div class="worker-event-list">
         <button
           v-for="group in recentWorkerEventGroups"
@@ -1943,6 +2167,7 @@ watch(developerMode, (enabled) => {
           <span>{{ t('debug.workerEventCount', { count: selectedWorkerEvent?.eventCount || 0 }) }}</span>
           <span>{{ workerEventGroupSummary(selectedWorkerEvent) }}</span>
           <time>{{ eventTime(selectedWorkerEvent?.lastTimestamp) }}</time>
+          <n-button size="tiny" tertiary @click="copyText(workerEventGroupPayload(selectedWorkerEvent), 'debug.eventCopied')">{{ t('common.copy') }}</n-button>
         </div>
         <pre class="worker-event-modal-payload">{{ workerEventGroupPayload(selectedWorkerEvent) }}</pre>
       </n-modal>
@@ -1955,6 +2180,7 @@ watch(developerMode, (enabled) => {
           <span>{{ t('debug.sessionLog') }}</span>
         </div>
       </template>
+      <n-alert v-if="debugLogError" type="error" class="debug-log-read-error">{{ debugLogError }}</n-alert>
       <div class="debug-log-console-head">
         <div class="debug-log-toolbar">
           <n-button size="small" secondary :loading="debugLogLoading" @click="loadDebugLog">
@@ -1963,7 +2189,7 @@ watch(developerMode, (enabled) => {
           <n-button size="small" secondary :disabled="!debugLogInfo?.logsDir" @click="revealPath(debugLogInfo?.logsDir || logsDir)">
             {{ t('debug.openLogsDir') }}
           </n-button>
-          <n-button size="small" secondary :disabled="!debugLogContent?.content" @click="copyDebugLog">
+          <n-button size="small" secondary :disabled="!filteredDebugLogLines.length" @click="copyDebugLog">
             {{ t('debug.copyLog') }}
           </n-button>
           <n-button size="small" secondary :loading="debugLogReportLoading" @click="createDebugLogReport">
@@ -1972,9 +2198,10 @@ watch(developerMode, (enabled) => {
           <n-button size="small" secondary :disabled="!debugLogInfo?.reportExists" @click="revealPath(debugLogInfo?.reportPath || '')">
             {{ t('debug.openReport') }}
           </n-button>
-          <n-button size="small" secondary type="warning" :loading="debugLogClearing" @click="clearDebugLog">
-            {{ t('debug.clearLog') }}
-          </n-button>
+          <n-popconfirm @positive-click="clearDebugLog">
+            <template #trigger><n-button size="small" secondary type="warning" :loading="debugLogClearing">{{ t('debug.clearLog') }}</n-button></template>
+            {{ t('debug.confirmClearLog') }}
+          </n-popconfirm>
         </div>
         <details class="debug-log-meta-panel">
           <summary>{{ t('debug.logFileDetails') }}</summary>
@@ -2153,7 +2380,130 @@ watch(developerMode, (enabled) => {
   align-items: flex-start;
   justify-content: space-between;
   gap: 16px;
+  flex-wrap: wrap;
 }
+
+.debug-header-actions,
+.debug-task-entry__meta,
+.debug-task-entry__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.debug-health-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.debug-health-grid > :last-child,
+.debug-activity-error {
+  grid-column: 1 / -1;
+}
+
+.debug-check-status,
+.diagnostic-row__head,
+.debug-task-entry__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.debug-check-status,
+.debug-group-hint,
+.debug-task-entry__meta,
+.debug-event-toolbar > span {
+  color: var(--on-surface-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.debug-group-hint { margin: 0 0 12px; }
+.diagnostic-state { flex-shrink: 0; font-size: 11px; }
+
+.diagnostic-row__main p {
+  margin: 2px 0;
+  color: var(--on-surface-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.diagnostic-action {
+  justify-self: start;
+  border: 0;
+  padding: 4px 0;
+  background: transparent;
+  color: var(--primary);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.debug-tab,
+.debug-status-card,
+.diagnostic-action,
+.worker-event-row {
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.debug-tab:hover,
+.debug-status-card:hover,
+.diagnostic-action:hover {
+  background-color: color-mix(in srgb, var(--primary) 7%, var(--surface-1));
+}
+
+.debug-tab:focus-visible,
+.debug-status-card:focus-visible,
+.diagnostic-action:focus-visible,
+.worker-event-row:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.debug-task-entry {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-2) 36%, transparent);
+}
+
+.debug-task-entry__head strong {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+
+.debug-task-entry__head span,
+.debug-task-entry p {
+  margin: 0;
+  color: var(--on-surface-muted);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.debug-task-entry code { font-size: 11px; overflow-wrap: anywhere; }
+.debug-task-entry .debug-task-entry__error { color: var(--danger); white-space: pre-wrap; }
+.debug-task-entry > .n-button { justify-self: start; }
+
+.debug-event-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.debug-log-read-error { margin-bottom: 12px; }
+.debug-activity-grid { align-items: start; }
+.debug-execution-log-error { color: var(--danger); white-space: pre-wrap; overflow-wrap: anywhere; }
+.debug-node-logs { margin-top: 12px; }
+.debug-node-logs summary { padding: 8px 0; cursor: pointer; font-size: 12px; }
 
 .debug-tabs {
   display: flex;
@@ -2370,6 +2720,9 @@ watch(developerMode, (enabled) => {
   border-radius: 16px;
   border: 1px solid color-mix(in srgb, var(--outline) 52%, transparent);
   background: color-mix(in srgb, var(--surface-1) 72%, transparent);
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
 }
 
 .debug-status-card span {
@@ -2390,6 +2743,15 @@ watch(developerMode, (enabled) => {
 
 .debug-status-card--warn {
   border-color: color-mix(in srgb, var(--warning) 42%, var(--outline));
+}
+
+.debug-status-card--error {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--outline));
+}
+
+.debug-status-card small {
+  color: var(--on-surface-muted);
+  font-size: 11px;
 }
 
 .debug-card {
@@ -3022,6 +3384,11 @@ watch(developerMode, (enabled) => {
 .diagnostic-row--ok { color: var(--success); }
 .diagnostic-row--warn { color: var(--warning); }
 .diagnostic-row--error { color: var(--danger); }
+.diagnostic-row--unknown,
+.diagnostic-row--optional { color: var(--on-surface-muted); }
+.diagnostic-row--ok .diagnostic-state { color: var(--success); }
+.diagnostic-row--warn .diagnostic-state { color: var(--warning); }
+.diagnostic-row--error .diagnostic-state { color: var(--danger); }
 
 .diagnostic-row__main {
   display: grid;
@@ -3073,7 +3440,13 @@ watch(developerMode, (enabled) => {
 }
 
 .path-debug-row {
-  grid-template-columns: 150px minmax(0, 1fr) auto;
+  grid-template-columns: 150px minmax(0, 1fr) auto auto;
+}
+
+.diagnostic-row__main code {
+  overflow: visible;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .cuda-list {
@@ -3166,7 +3539,7 @@ watch(developerMode, (enabled) => {
 }
 
 @media (max-width: 980px) {
-  .debug-status-grid,
+  .debug-health-grid,
   .debug-grid,
   .debug-model-workbench,
   .runtime-status-panel,
@@ -3174,6 +3547,9 @@ watch(developerMode, (enabled) => {
   .runtime-page-grid {
     grid-template-columns: 1fr;
   }
+
+  .debug-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .debug-event-toolbar { grid-template-columns: 1fr; }
 
   .catalog-simple-editor,
   .catalog-form-grid {
@@ -3218,6 +3594,15 @@ watch(developerMode, (enabled) => {
     grid-template-columns: 1fr;
     justify-items: center;
     text-align: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .debug-tab,
+  .debug-status-card,
+  .diagnostic-action,
+  .worker-event-row {
+    transition: none;
   }
 }
 </style>

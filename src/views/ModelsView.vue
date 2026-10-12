@@ -170,6 +170,10 @@ function modelUseCount(modelOrName: ModelEntry | string | null | undefined) {
   return name ? modelStore.getModelUseCount(name) : 0
 }
 
+function modelNameParts(name: string) {
+  return name.split(/(?<=[_-])/u)
+}
+
 function toggleFavorite(model: ModelEntry, event?: MouseEvent) {
   event?.stopPropagation()
   modelStore.toggleModelFavorite(model.name)
@@ -1146,13 +1150,14 @@ onMounted(() => {
           <div class="mc-header">
             <div class="mc-title">
               <div class="mc-name-row">
-                <span class="mc-name" :title="model.name">{{ model.name }}</span>
+                <span class="mc-name" :title="model.name"><template v-for="(part, index) in modelNameParts(model.name)" :key="index">{{ part }}<wbr /></template></span>
                 <n-button
                   quaternary
                   circle
                   size="tiny"
                   :type="isFavoriteModel(model) ? 'warning' : 'default'"
                   :title="isFavoriteModel(model) ? t('models.unfavorite') : t('models.favorite')"
+                  :aria-label="isFavoriteModel(model) ? t('models.unfavorite') : t('models.favorite')"
                   class="mc-favorite"
                   @click.stop="toggleFavorite(model, $event)"
                 >
@@ -1177,24 +1182,23 @@ onMounted(() => {
           </div>
           <!-- Meta Tags -->
           <div class="mc-tags">
-            <n-tag v-if="model.architecture" :bordered="false" size="tiny" type="info" round>
+            <n-tag v-if="model.architecture" :bordered="false" size="tiny" type="info" round :title="model.architecture">
               {{ model.architecture }}
             </n-tag>
-            <n-tag v-if="showModelTypeTag(model)" :bordered="false" size="tiny" round>
+            <n-tag v-if="showModelTypeTag(model)" :bordered="false" size="tiny" round :title="model.modelType || undefined">
               {{ model.modelType }}
             </n-tag>
           </div>
 
-          <!-- Key info: values read fine without their labels shouting, so both sit on
-               one wrapping line rather than as a label/value table. -->
+          <!-- Stable field positions keep models comparable across each card row. -->
           <div class="mc-meta">
-            <div class="mc-meta-item">
+            <div class="mc-meta-item mc-meta-item--target">
               <span class="mc-label">{{ t('models.targetStem') }}</span>
-              <span class="mc-value">{{ targetStemLabel(model) || '—' }}</span>
+              <span class="mc-value" :title="targetStemLabel(model)">{{ targetStemLabel(model) || '—' }}</span>
             </div>
-            <div class="mc-meta-item">
+            <div class="mc-meta-item mc-meta-item--category">
               <span class="mc-label">{{ t('models.category') }}</span>
-              <span class="mc-value">{{ categoryLabel(model) || '—' }}</span>
+              <span class="mc-value" :title="categoryLabel(model) || undefined">{{ categoryLabel(model) || '—' }}</span>
             </div>
             <div class="mc-meta-item mc-meta-item--usage">
               <span class="mc-label">{{ t('models.useCountLabel') }}</span>
@@ -1761,14 +1765,14 @@ onMounted(() => {
   display: grid;
   /* One column per control: search | category | source | sort | actions. A missing column would
      push the last control into an implicit one and squeeze the switch label onto two lines. */
-  grid-template-columns: minmax(180px, 0.92fr) 220px 160px 180px auto;
+  grid-template-columns: minmax(240px, 1fr) minmax(150px, 200px) minmax(110px, 150px) minmax(130px, 170px) auto;
   align-items: center;
   gap: 10px;
 }
 
 .search-input {
   max-width: none;
-  min-width: 180px;
+  min-width: 0;
 }
 
 .toolbar-actions {
@@ -1780,7 +1784,8 @@ onMounted(() => {
 
 /* ===== Category Select ===== */
 .category-select {
-  width: 220px;
+  width: 100%;
+  min-width: 0;
   flex-shrink: 0;
 }
 
@@ -1819,12 +1824,14 @@ onMounted(() => {
 }
 
 .source-select {
-  width: 150px;
+  width: 100%;
+  min-width: 0;
   flex-shrink: 0;
 }
 
 .sort-select {
-  width: 170px;
+  width: 100%;
+  min-width: 0;
   flex-shrink: 0;
 }
 
@@ -1832,6 +1839,7 @@ onMounted(() => {
 .models-body {
   display: flex;
   flex-direction: column;
+  container: model-library / inline-size;
 }
 
 .model-grid {
@@ -1847,11 +1855,8 @@ onMounted(() => {
 
 /* Columns are added as the window allows rather than at fixed breakpoints. */
 .model-grid--card {
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  /* Each card is as tall as its own content. Equal row heights line the bottom bars up, but one
-     card downloading is much taller than the rest, and every neighbour then stretches to match
-     it — a large void in each is a worse trade than a ragged bottom edge. */
-  align-items: start;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 270px), 1fr));
+  align-items: stretch;
   gap: 12px;
 }
 
@@ -1886,9 +1891,6 @@ onMounted(() => {
     linear-gradient(180deg, rgba(255,255,255,0.018), transparent 54%),
     color-mix(in srgb, var(--surface-1) 64%, transparent);
   transition: box-shadow 0.15s ease, border-color 0.15s ease, background 0.15s ease;
-  /* Layout comes from the card's own width, not the window's: in card mode the two are
-     unrelated, since a 300px card can sit on a 2560px screen. */
-  container-type: inline-size;
   position: relative;
   overflow: hidden;
 }
@@ -1905,9 +1907,33 @@ onMounted(() => {
 
 .model-grid--card .mc-bottom {
   margin-top: auto;
+  min-height: 43px;
   padding-top: 10px;
   border-top: 1px solid color-mix(in srgb, var(--outline) 38%, transparent);
 }
+
+@supports (grid-template-rows: subgrid) {
+  .model-grid--card .model-card {
+    display: grid;
+    grid-template-rows: subgrid;
+    grid-row: span 4;
+  }
+}
+.model-grid--card .mc-tags { min-height: 20px; flex-wrap: nowrap; }
+.model-grid--card .mc-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "target target" "category usage";
+  gap: 6px 12px;
+}
+.model-grid--card .mc-meta-item--target { grid-area: target; }
+.model-grid--card .mc-meta-item--category { grid-area: category; }
+.model-grid--card .mc-meta-item--usage { grid-area: usage; }
+.model-grid--card .mc-meta-item:not(.mc-meta-item--usage) {
+  display: grid;
+  grid-template-columns: minmax(4em, max-content) minmax(0, 1fr);
+}
+.mc-meta-item--usage { color: var(--on-surface-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* ---- List: the original two-line row — the name over its details, with tags and actions
    riding on the right. Spreading the same content across one flex line left large gaps between
@@ -1929,7 +1955,7 @@ onMounted(() => {
 .model-grid--list .mc-bottom { grid-area: bottom; justify-content: flex-end; gap: 12px; }
 
 /* A narrow window cannot hold three columns; stack rather than crush them. */
-@container (max-width: 620px) {
+@container model-library (max-width: 760px) {
   .model-grid--list .model-card {
     grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
@@ -1946,6 +1972,11 @@ onMounted(() => {
   }
 }
 
+@container (max-width: 350px) {
+  .model-grid--card .mc-speed { display: none; }
+  .model-grid--card .model-card--busy .mc-size { display: none; }
+}
+
 /* A running download is the one thing on the page that changes by itself; a tinted edge makes
    it findable without scanning every card. */
 .model-card--busy {
@@ -1958,10 +1989,11 @@ onMounted(() => {
 /* ---- Action row: one line, identical height in every state ---- */
 .mc-bottom {
   display: flex;
+  container-type: inline-size;
   align-items: center;
   gap: 10px;
   min-width: 0;
-  min-height: 26px;
+  min-height: 30px;
 }
 
 .mc-size {
@@ -2132,20 +2164,20 @@ onMounted(() => {
 }
 
 .mc-name-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: flex-start;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
 }
 
 .mc-name {
   display: -webkit-box;
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
-  flex: 0 1 auto;
   min-width: 0;
   max-width: 100%;
-  line-height: 1.45;
+  line-height: 1.5;
   overflow: hidden;
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
@@ -2168,13 +2200,11 @@ onMounted(() => {
 
 .mc-favorite {
   flex: 0 0 auto;
-  margin-top: -4px;
   opacity: 0.62;
 }
 
 .mc-more {
   flex: 0 0 auto;
-  margin-top: -4px;
   opacity: 0.62;
 }
 
@@ -2197,6 +2227,8 @@ onMounted(() => {
 
 .mc-tags :deep(.n-tag) {
   max-width: 100%;
+  min-width: 0;
+  flex-shrink: 1;
 }
 
 .mc-tags :deep(.n-tag__content) {
@@ -2233,6 +2265,7 @@ onMounted(() => {
 .mc-label {
   color: var(--on-surface-muted);
   flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .mc-value {
@@ -2648,7 +2681,12 @@ onMounted(() => {
 }
 
 /* ===== Responsive ===== */
-@media (max-width: 900px) {
+@media (max-width: 1180px) {
+  .toolbar-row { grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 0.9fr) auto; }
+  .search-input { grid-column: 1 / -1; }
+}
+
+@media (max-width: 760px) {
   .search-input {
     max-width: 100%;
   }
@@ -2691,6 +2729,10 @@ onMounted(() => {
     flex-wrap: wrap;
   }
 }
+@media (max-width: 560px) {
+  .sort-select, .toolbar-actions { grid-column: 1 / -1; }
+}
+
 @media (max-width: 720px) {
   .inference-editor-grid {
     grid-template-columns: 1fr;

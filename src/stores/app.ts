@@ -129,6 +129,7 @@ export type WorkerEventConnectionStatus = 'idle' | 'connecting' | 'connected' | 
 export const useAppStore = defineStore('app', () => {
   const envInfo = ref<EnvInfo | null>(null)
   const envLoading = ref(false)
+  const envError = ref<string | null>(null)
   const envCheckedOnce = ref(false)
   let envRequestId: string | null = null
   const workerEvents = ref<any[]>([])
@@ -245,6 +246,7 @@ export const useAppStore = defineStore('app', () => {
     if ((event?.type === 'env_info' || envCheckFailed) && (!envRequestId || event.requestId !== envRequestId)) return
     if (event?.type === 'env_info') {
       envInfo.value = event.payload
+      envError.value = null
       envLoading.value = false
       envCheckedOnce.value = true
       envRequestId = null
@@ -259,6 +261,7 @@ export const useAppStore = defineStore('app', () => {
       }
     }
     if (envCheckFailed) {
+      envError.value = lastError.value
       envLoading.value = false
       envCheckedOnce.value = true
       envRequestId = null
@@ -278,6 +281,7 @@ export const useAppStore = defineStore('app', () => {
     const requestId = crypto.randomUUID()
     envRequestId = requestId
     envLoading.value = true
+    envError.value = null
     lastError.value = null
     try {
       const result: EnvInfo = isTauriRuntime()
@@ -285,11 +289,15 @@ export const useAppStore = defineStore('app', () => {
         : { platform: navigator.platform }
       if (envRequestId === requestId) {
         envInfo.value = result
+        envError.value = null
         envCheckedOnce.value = true
       }
       return result
     } catch (error) {
-      if (envRequestId === requestId) lastError.value = error instanceof Error ? error.message : String(error)
+      if (envRequestId === requestId) {
+        envError.value = error instanceof Error ? error.message : String(error)
+        lastError.value = envError.value
+      }
       throw error
     } finally {
       if (envRequestId === requestId) {
@@ -308,6 +316,7 @@ export const useAppStore = defineStore('app', () => {
     const requestId = crypto.randomUUID()
     envRequestId = requestId
     envLoading.value = true
+    envError.value = null
     lastError.value = null
     try {
       await import('@/utils/events').then(({ registerWorkerEvents }) => registerWorkerEvents())
@@ -317,7 +326,8 @@ export const useAppStore = defineStore('app', () => {
       if (envRequestId === requestId) {
         envRequestId = null
         envLoading.value = false
-        lastError.value = error instanceof Error ? error.message : String(error)
+        envError.value = error instanceof Error ? error.message : String(error)
+        lastError.value = envError.value
       }
       throw error
     }
@@ -728,6 +738,7 @@ export const useAppStore = defineStore('app', () => {
   return {
     envInfo,
     envLoading,
+    envError,
     envCheckedOnce,
     workerEvents,
     workerEventConnectionStatus,
