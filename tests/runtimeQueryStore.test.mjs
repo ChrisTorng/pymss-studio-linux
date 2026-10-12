@@ -110,6 +110,78 @@ test('each checkRuntimeInfo call starts a fresh worker probe', async () => {
   assert.equal(app.runtimeInfo?.manifestVersion, 'snapshot-2')
 })
 
+test('runtime page visits reuse startup queries and recent snapshots without another env probe', async () => {
+  const info = deferred()
+  const calls = []
+  const app = appStore(async command => {
+    calls.push(command)
+    if (command === 'runtime_info') return info.promise
+    if (command === 'runtime_env_sizes') return { sizes: { cuda: 123 }, incompleteBackends: [] }
+    if (command === 'runtime_core_versions') return { packages: {} }
+    throw new Error(`unexpected ${command}`)
+  })
+  const startup = app.checkRuntimeInfo()
+  const visit = app.ensureRuntimeInfo()
+  assert.equal(app.runtimeInfoLoading, true)
+  info.resolve({ ready: true, installedBackend: 'cuda' })
+  await Promise.all([startup, visit])
+  await Promise.all([app.ensureRuntimeEnvSizes(), app.ensureRuntimeCoreVersions()])
+  await Promise.all([app.ensureRuntimeInfo(), app.ensureRuntimeEnvSizes(), app.ensureRuntimeCoreVersions()])
+  assert.deepEqual(calls.toSorted(), ['runtime_core_versions', 'runtime_env_sizes', 'runtime_info'])
+  assert.equal(app.runtimeInfoLoading, false)
+})
+
+test('environment information becomes ready before a slow disk scan', async () => {
+  const scan = deferred()
+  const app = appStore(async command => {
+    if (command === 'runtime_info') return { ready: true }
+    if (command === 'runtime_env_sizes') return scan.promise
+    throw new Error(`unexpected ${command}`)
+  })
+  const info = app.ensureRuntimeInfo()
+  const sizes = app.ensureRuntimeEnvSizes()
+  await info
+  assert.equal(app.runtimeInfo.ready, true)
+  assert.equal(app.runtimeInfoLoading, false)
+  assert.equal(app.runtimeEnvSizesLoading, true)
+  scan.resolve({ sizes: { cpu: 42 } })
+  await sizes
+  assert.equal(app.runtimeEnvSizesLoading, false)
+})
+
+test('a failed size refresh preserves the display but retries on the next visit', async () => {
+  let scans = 0
+  const app = appStore(async command => {
+    assert.equal(command, 'runtime_env_sizes')
+    if (++scans === 2) throw new Error('scan failed')
+    return { sizes: { cpu: scans } }
+  })
+  await app.ensureRuntimeEnvSizes()
+  assert.deepEqual(await app.loadRuntimeEnvSizes(), { cpu: 1 })
+  assert.equal(app.runtimeEnvSizesError, 'scan failed')
+  assert.deepEqual(await app.ensureRuntimeEnvSizes(), { cpu: 3 })
+  assert.equal(app.runtimeEnvSizesError, '')
+})
+
+test('deleting an environment invalidates cached disk sizes and runtime snapshots', async () => {
+  const calls = []
+  let deleted = false
+  const app = appStore(async command => {
+    calls.push(command)
+    if (command === 'runtime_info') return { installedEnvironments: deleted ? [] : [{ backend: 'cpu' }] }
+    if (command === 'runtime_env_sizes') return { sizes: deleted ? {} : { cpu: 42 } }
+    if (command === 'delete_runtime') { deleted = true; return true }
+    throw new Error(`unexpected ${command}`)
+  })
+  await app.ensureRuntimeInfo()
+  await app.ensureRuntimeEnvSizes()
+  await app.deleteRuntime('cpu')
+  await app.ensureRuntimeInfo()
+  await app.ensureRuntimeEnvSizes()
+  assert.deepEqual(calls, ['runtime_info', 'runtime_env_sizes', 'delete_runtime', 'runtime_info', 'runtime_env_sizes'])
+  assert.deepEqual(app.runtimeEnvSizes, {})
+})
+
 function deferred() {
   let resolve
   let reject

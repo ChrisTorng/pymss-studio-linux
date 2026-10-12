@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
-import { createRuntimeQueryQueue } from '@/utils/runtimeQueries'
+import { createRuntimeQueryQueue, createRuntimeReadCache } from '@/utils/runtimeQueries'
 import { isTauriRuntime } from '@/utils/appStore'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
 
@@ -136,6 +136,8 @@ export const useAppStore = defineStore('app', () => {
   const workerEventConnectionError = ref('')
   const lastError = ref<string | null>(null)
   const runtimeInfo = ref<RuntimeInfo | null>(null)
+  const runtimeInfoLoading = ref(false)
+  const runtimeInfoError = ref('')
   const runtimeInstallTaskId = ref<string | null>(null)
   const runtimeInstallStatus = ref<'idle' | 'installing' | 'success' | 'error' | 'cancelled'>('idle')
   const runtimeInstallBackend = ref<string | null>(null)
@@ -149,6 +151,7 @@ export const useAppStore = defineStore('app', () => {
   const runtimeCoreUpdateMode = ref<'update' | 'repair'>('update')
   const runtimeEnvSizes = ref<Record<string, number>>({})
   const runtimeEnvSizesLoading = ref(false)
+  const runtimeEnvSizesError = ref('')
   // Backends whose venv exists but never finished installing — leftover disk usage the user
   // can reclaim.
   const runtimeIncompleteBackends = ref<string[]>([])
@@ -327,6 +330,15 @@ export const useAppStore = defineStore('app', () => {
   // Queries and writes take the same worker-side lock. Each enqueue supplies a fresh
   // callback, and background writes keep their queue slot until a terminal event.
   const runRuntimeQuery = createRuntimeQueryQueue()
+  const runtimeInfoCache = createRuntimeReadCache<RuntimeInfo>(2 * 60_000)
+  const runtimeSizesCache = createRuntimeReadCache<Record<string, number>>(10 * 60_000)
+  const runtimeVersionsCache = createRuntimeReadCache<RuntimeCoreVersions | null>(15 * 60_000)
+
+  function invalidateRuntimeReads() {
+    runtimeInfoCache.invalidate()
+    runtimeSizesCache.invalidate()
+    runtimeVersionsCache.invalidate()
+  }
 
   type RuntimeBackgroundOperation = {
     dispatched: boolean
@@ -340,6 +352,7 @@ export const useAppStore = defineStore('app', () => {
   const runtimeBackgroundOperations = new Map<string, RuntimeBackgroundOperation>()
 
   function startRuntimeBackground(command: string, taskId: string, payload: Record<string, unknown>, finishedEvent: string) {
+    invalidateRuntimeReads()
     let resolveStarted!: () => void
     let rejectStarted!: (error: unknown) => void
     let resolveCompleted!: () => void
@@ -429,14 +442,17 @@ export const useAppStore = defineStore('app', () => {
 
   let runtimeEnvSizesWaiting = 0
 
-  async function loadRuntimeEnvSizes() {
+  async function queryRuntimeEnvSizes() {
     runtimeEnvSizesWaiting += 1
     runtimeEnvSizesLoading.value = true
+    runtimeEnvSizesError.value = ''
     try {
-      return await measureRuntimeEnvSizes()
-    } catch {
-      // Sizes are supplementary — a failure must not break the settings page.
-      return runtimeEnvSizes.value
+      const result = await measureRuntimeEnvSizes()
+      runtimeEnvSizesError.value = ''
+      return result
+    } catch (error) {
+      runtimeEnvSizesError.value = error instanceof Error ? error.message : String(error)
+      throw error
     } finally {
       runtimeEnvSizesWaiting -= 1
       // Only the last caller clears the flag; queued callers are still measuring.
@@ -444,32 +460,77 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  async function checkRuntimeInfo(backend?: RuntimeBackend) {
-    return runRuntimeQuery(async () => {
-      if (!isTauriRuntime()) {
-        const result: RuntimeInfo = { ready: false, backend: backend || null, platform: navigator.platform }
-        runtimeInfo.value = result
-        return result
-      }
-      const result = await invoke<RuntimeInfo>('runtime_info', { payload: backend ? { backend } : {} })
-      runtimeInfo.value = result
-      return result
-    })
+  async function readRuntimeEnvSizes(fresh: boolean) {
+    try {
+      return await runtimeSizesCache.read(queryRuntimeEnvSizes, fresh)
+    } catch {
+      // Keep the last displayed size on failure, without marking it fresh.
+      return runtimeEnvSizes.value
+    }
   }
 
-  async function loadRuntimeCoreVersions() {
+  const loadRuntimeEnvSizes = () => readRuntimeEnvSizes(true)
+  const ensureRuntimeEnvSizes = () => readRuntimeEnvSizes(false)
+  let runtimeInfoWaiting = 0
+
+  async function queryRuntimeInfo(backend?: RuntimeBackend) {
+    runtimeInfoWaiting += 1
+    runtimeInfoLoading.value = true
+    runtimeInfoError.value = ''
+    try {
+      return await runRuntimeQuery(async () => {
+        if (!isTauriRuntime()) {
+          const result: RuntimeInfo = { ready: false, backend: backend || null, platform: navigator.platform }
+          runtimeInfo.value = result
+          runtimeInfoError.value = ''
+          return result
+        }
+        const result = await invoke<RuntimeInfo>('runtime_info', { payload: backend ? { backend } : {} })
+        runtimeInfo.value = result
+        runtimeInfoError.value = ''
+        return result
+      })
+    } catch (error) {
+      runtimeInfoError.value = error instanceof Error ? error.message : String(error)
+      throw error
+    } finally {
+      runtimeInfoWaiting -= 1
+      runtimeInfoLoading.value = runtimeInfoWaiting > 0
+    }
+  }
+
+  function checkRuntimeInfo(backend?: RuntimeBackend) {
+    if (backend) {
+      runtimeInfoCache.invalidate()
+      return queryRuntimeInfo(backend)
+    }
+    return runtimeInfoCache.read(() => queryRuntimeInfo(), true)
+  }
+
+  const ensureRuntimeInfo = () => runtimeInfoCache.read(() => queryRuntimeInfo())
+  let runtimeVersionsWaiting = 0
+  let runtimeVersionsRequest = 0
+
+  async function queryRuntimeCoreVersions() {
+    const request = ++runtimeVersionsRequest
+    runtimeVersionsWaiting += 1
     runtimeCoreVersionsLoading.value = true
     try {
       if (!isTauriRuntime()) {
         runtimeCoreVersions.value = null
         return runtimeCoreVersions.value
       }
-      runtimeCoreVersions.value = await invoke<RuntimeCoreVersions>('runtime_core_versions')
-      return runtimeCoreVersions.value
+      const result = await invoke<RuntimeCoreVersions>('runtime_core_versions')
+      if (request === runtimeVersionsRequest) runtimeCoreVersions.value = result
+      return result
     } finally {
-      runtimeCoreVersionsLoading.value = false
+      runtimeVersionsWaiting -= 1
+      runtimeCoreVersionsLoading.value = runtimeVersionsWaiting > 0
     }
   }
+
+  const loadRuntimeCoreVersions = () => runtimeVersionsCache.read(queryRuntimeCoreVersions, true)
+  const ensureRuntimeCoreVersions = () => runtimeVersionsCache.read(queryRuntimeCoreVersions)
 
   async function installRuntime(backend: RuntimeBackend, mirror = 'auto', locale = '') {
     const taskId = `runtime_install_${crypto.randomUUID()}`
@@ -526,6 +587,7 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function mutateRuntime<T>(mutation: () => Promise<T>): Promise<T> {
+    invalidateRuntimeReads()
     return runRuntimeQuery(() => withRuntimeMutation(mutation), { retryBusy: false })
   }
 
@@ -581,7 +643,7 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function deleteRuntime(backend: RuntimeBackend, target: { pythonPath?: string } = {}) {
-    await runRuntimeQuery(() => invoke('delete_runtime', { payload: { backend, ...target } }), { retryBusy: false })
+    await mutateRuntime(() => invoke('delete_runtime', { payload: { backend, ...target } }))
     await checkRuntimeInfo()
   }
 
@@ -683,6 +745,8 @@ export const useAppStore = defineStore('app', () => {
     checkEnv,
     checkEnvInBackground,
     runtimeInfo,
+    runtimeInfoLoading,
+    runtimeInfoError,
     runtimeInstallTaskId,
     runtimeInstallStatus,
     runtimeInstallBackend,
@@ -696,6 +760,7 @@ export const useAppStore = defineStore('app', () => {
     runtimeCoreUpdateMode,
     runtimeEnvSizes,
     runtimeEnvSizesLoading,
+    runtimeEnvSizesError,
     runtimeIncompleteBackends,
     buildInfoVersion,
     buildInfoVariant,
@@ -703,6 +768,9 @@ export const useAppStore = defineStore('app', () => {
     loadRuntimeEnvSizes,
     checkRuntimeInfo,
     loadRuntimeCoreVersions,
+    ensureRuntimeInfo,
+    ensureRuntimeEnvSizes,
+    ensureRuntimeCoreVersions,
     installRuntime,
     cancelRuntimeCoreUpdate,
     updateRuntimeCore,

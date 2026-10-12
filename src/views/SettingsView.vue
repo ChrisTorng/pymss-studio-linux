@@ -147,7 +147,8 @@ const proxyTestSuggestion = ref('')
 const proxyTestElapsed = ref(0)
 const proxyTestLoading = computed(() => proxyTestStatus.value === 'testing')
 const runtimeMirror = ref('auto')
-const runtimeDetecting = ref(false)
+const runtimeManualChecking = ref(false)
+const runtimeDetecting = computed(() => app.runtimeInfoLoading || runtimeManualChecking.value)
 const runtimeDeleting = ref<string | null>(null)
 const runtimeActivating = ref<string | null>(null)
 const runtimeLogDialogVisible = ref(false)
@@ -398,27 +399,34 @@ watch(() => app.runtimeInstallStatus, (status, previous) => {
 })
 
 async function refreshRuntimeStatus(showSuccess = false) {
-  runtimeDetecting.value = true
+  if (showSuccess) runtimeManualChecking.value = true
+  const info = showSuccess ? app.checkRuntimeInfo() : app.ensureRuntimeInfo()
+  // Startup owns the detailed device probe. Page visits only refresh the overview;
+  // explicit detection still checks the active interpreter and all its devices.
+  const env = showSuccess ? app.checkEnv() : Promise.resolve()
+  // Disk usage updates separately and does not hold the detection button open.
+  void (showSuccess ? app.loadRuntimeEnvSizes() : app.ensureRuntimeEnvSizes())
   try {
-    await Promise.all([app.checkRuntimeInfo(), app.checkEnv(), app.loadRuntimeEnvSizes()])
+    const results = await Promise.allSettled([info, env])
+    const failed = results.find(result => result.status === 'rejected')
+    if (failed?.status === 'rejected') throw failed.reason
     if (showSuccess) message.success(t('settings.runtimeDetectSuccess'))
   } catch (error) {
     if (showSuccess) message.error(error instanceof Error ? error.message : String(error))
   } finally {
-    runtimeDetecting.value = false
+    if (showSuccess) runtimeManualChecking.value = false
   }
 }
 
-async function refreshRuntimeCoreVersions() {
+async function refreshRuntimeCoreVersions(fresh = false) {
   try {
-    await app.loadRuntimeCoreVersions()
+    await (fresh ? app.loadRuntimeCoreVersions() : app.ensureRuntimeCoreVersions())
   } catch {
     // Network availability is optional for the settings page; the installed version still shows.
   }
 }
 
-// Measuring disk usage walks every file in each venv, so only refresh the full runtime section
-// when it is visible.
+// Reuse recent or in-flight reads when returning to this section.
 watch(activeSection, (section) => {
   if (section === 'runtime') {
     void refreshRuntimeStatus(false)
@@ -445,8 +453,7 @@ const runtimeDiskTotalLabel = computed(() => {
 
 // Walking several multi-GB venvs takes visible time on a slow disk; say so rather than
 // leaving the section silently size-less.
-const runtimeDiskMeasuring = computed(() =>
-  app.runtimeEnvSizesLoading && !Object.keys(app.runtimeEnvSizes).length)
+const runtimeDiskMeasuring = computed(() => app.runtimeEnvSizesLoading)
 
 async function cancelRuntimeInstall() {
   try {
@@ -517,6 +524,8 @@ async function activateInstalledRuntime(card: { backend: RuntimeBackend; env?: I
 }
 
 async function detectRuntime() {
+  if (runtimeBusy.value) return
+  void refreshRuntimeCoreVersions(true)
   await refreshRuntimeStatus(true)
 }
 
@@ -801,7 +810,7 @@ const updateLastCheckedLabel = computed(() => {
 const runtimeSummaryItems = computed(() => [
   { label: t('settings.runtimeCurrentLabel'), value: runtimeCurrentLabel.value, meta: t('settings.runtimeCurrentMeta') },
   { label: 'Torch', value: app.runtimeInfo?.torchVersion || app.envInfo?.torchVersion || t('common.unknown'), meta: t('settings.runtimeTorchMeta') },
-  { label: 'pymss', value: app.envInfo?.pymssVersion || t('common.unknown'), meta: t('settings.runtimePymssMeta') },
+  { label: 'pymss', value: app.runtimeInfo?.pymssVersion || app.envInfo?.pymssVersion || t('common.unknown'), meta: t('settings.runtimePymssMeta') },
 ])
 const updateReleaseDateLabel = computed(() => {
   return formatDateTime(updates.releaseDate)
@@ -1117,9 +1126,6 @@ onMounted(async () => {
   await loadBuildInfo()
   if (updateSupported.value) {
     void checkForUpdates(false)
-  }
-  if (!app.envInfo && !app.envLoading) {
-    app.checkEnvInBackground().catch(() => {})
   }
 })
 
@@ -1493,7 +1499,7 @@ onMounted(async () => {
               </div>
               <div class="about-hero__copy">
                 <span class="about-eyebrow">{{ t('settings.runtime') }}</span>
-                <h2 class="about-hero__title">{{ runtimeCurrentLabel }}</h2>
+                <h2 class="about-hero__title">{{ !app.runtimeInfo && !app.envInfo && runtimeDetecting ? t('settings.runtimeChecking') : runtimeCurrentLabel }}</h2>
                 <p v-if="runtimeCurrentError" class="runtime-hero__desc runtime-hero__desc--error">{{ runtimeCurrentError }}</p>
                 <p v-else class="runtime-hero__desc">{{ t('settings.runtimeDesc') }}</p>
               </div>
@@ -1505,7 +1511,8 @@ onMounted(async () => {
             <div class="about-stats" :aria-label="t('settings.runtime')">
               <div v-for="item in runtimeSummaryItems" :key="item.label" class="about-stat">
                 <span class="about-stat__label">{{ item.label }}</span>
-                <strong class="about-stat__value">{{ item.value }}</strong>
+                <n-skeleton v-if="!app.runtimeInfo && !app.envInfo && runtimeDetecting" text width="65%" :sharp="false" />
+                <strong v-else :key="item.value" class="about-stat__value runtime-value">{{ item.value }}</strong>
                 <small class="about-stat__meta">{{ item.meta }}</small>
               </div>
             </div>
@@ -1519,7 +1526,33 @@ onMounted(async () => {
               </span>
               <span>{{ t('settings.runtimeBackendsSection') }}</span>
             </div>
-            <div class="runtime-envs-list">
+            <div class="runtime-read-status" role="status" aria-live="polite">
+              <span :class="{ 'runtime-read-status--error': app.runtimeInfoError }">
+                <n-spin v-if="app.runtimeInfoLoading" :size="12" />
+                <n-icon v-else :component="app.runtimeInfoError ? AlertCircleOutline : CheckmarkCircleOutline" size="14" />
+                {{ t(app.runtimeInfoLoading ? 'settings.runtimeChecking' : app.runtimeInfoError ? 'settings.runtimeRefreshFailed' : 'settings.runtimeInfoReady') }}
+              </span>
+              <span v-if="app.envLoading">
+                <n-spin :size="12" />{{ t('settings.runtimeDevicesChecking') }}
+              </span>
+              <span v-if="runtimeDiskMeasuring">
+                <n-spin :size="12" />{{ t('settings.runtimeDiskMeasuring') }}
+              </span>
+              <span v-else-if="app.runtimeEnvSizesError" class="runtime-read-status--error">
+                <n-icon :component="AlertCircleOutline" size="14" />{{ t('settings.runtimeDiskMeasureFailed') }}
+              </span>
+            </div>
+            <p v-if="app.runtimeInfoError" class="runtime-read-error">{{ app.runtimeInfoError }}</p>
+            <Transition name="runtime-content" mode="out-in">
+            <div v-if="!app.runtimeInfo && app.runtimeInfoLoading" key="loading" class="runtime-envs-list" :aria-label="t('settings.runtimeChecking')" aria-busy="true">
+              <div v-for="backend in runtimeBackendCatalog" :key="backend.backend" class="runtime-env-card runtime-env-card--skeleton">
+                <strong class="runtime-env-card__backend">{{ backend.label }}</strong>
+                <n-skeleton text width="70%" :sharp="false" />
+                <n-skeleton text width="45%" :sharp="false" />
+                <n-skeleton height="24px" width="96px" :sharp="false" />
+              </div>
+            </div>
+            <div v-else key="ready" class="runtime-envs-list">
               <div
                 v-for="card in runtimeBackendCards"
                 :key="card.key"
@@ -1596,7 +1629,7 @@ onMounted(async () => {
                     secondary
                     type="primary"
                     :loading="card.installing"
-                    :disabled="runtimeBusy"
+                    :disabled="runtimeBusy || !app.runtimeInfo"
                     @click="installBackend(card.backend)"
                   >
                     <template #icon><n-icon :component="DownloadOutline" /></template>
@@ -1709,11 +1742,9 @@ onMounted(async () => {
                 </div>
               </div>
             </div>
+            </Transition>
 
-            <p v-if="runtimeDiskMeasuring" class="setting-row__hint runtime-disk-total">
-              {{ t('settings.runtimeDiskMeasuring') }}
-            </p>
-            <p v-else-if="runtimeDiskTotalLabel" class="setting-row__hint runtime-disk-total">
+            <p v-if="runtimeDiskTotalLabel" class="setting-row__hint runtime-disk-total">
               {{ t('settings.runtimeDiskTotal', { size: runtimeDiskTotalLabel }) }}
             </p>
 
@@ -2944,6 +2975,27 @@ onMounted(async () => {
 .runtime-envs-list {
   display: grid;
   gap: 10px;
+}
+
+.runtime-read-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  min-height: 20px;
+  color: var(--on-surface-muted);
+  font-size: 12px;
+}
+.runtime-read-status > span { display: inline-flex; align-items: center; gap: 6px; }
+.runtime-read-status--error, .runtime-read-error { color: var(--danger); }
+.runtime-read-error { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.runtime-env-card--skeleton { min-height: 140px; align-content: start; gap: 12px; }
+.runtime-content-enter-active, .runtime-content-leave-active { transition: opacity 160ms ease, transform 160ms ease; }
+.runtime-content-enter-from, .runtime-content-leave-to { opacity: 0; transform: translateY(4px); }
+.runtime-value { animation: runtime-value-in 180ms ease both; }
+@keyframes runtime-value-in { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .runtime-content-enter-active, .runtime-content-leave-active { transition: none; }
+  .runtime-value { animation: none; }
 }
 
 .runtime-env-card {
