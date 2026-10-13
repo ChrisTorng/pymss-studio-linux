@@ -26,9 +26,12 @@ type ManagedAudio = {
   clipId: string
   trackId: string
   sourceId: string
+  sourcePath: string
   audio: HTMLAudioElement
   metadataReady: boolean
   metadataPromise: Promise<void>
+  playPromise: Promise<void> | null
+  lastSeekAt: number
   fallbackUrl?: string | null
   graphEnabled?: boolean
   channelMode?: 'mono' | 'stereo'
@@ -57,6 +60,7 @@ type FollowPlayheadMode = 'playback' | 'seek'
 const ERROR_SESSION_NOT_LOADED = '请先加载编辑工程'
 const ERROR_NO_PLAYABLE_TRACKS = '当前没有可播放的音轨'
 const ERROR_NO_LOADED_AUDIO = '没有成功加载任何音频'
+const ERROR_AUDIO_CONTEXT = '音频输出尚未就绪，请重新播放'
 const ERROR_MISSING_ASSETS = () => String(i18n.global.t('editor.assetOfflineBlocked'))
 
 function clamp(value: number, min: number, max: number) {
@@ -288,7 +292,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
   }
 
   function releaseEntry(entry: ManagedAudio) {
-    entry.audio.pause()
+    pauseEntry(entry)
     entry.sourceNode?.disconnect()
     entry.gainNode?.disconnect()
     entry.balanceSplitter?.disconnect()
@@ -456,7 +460,23 @@ export function useEditorPlayback(options: PlaybackOptions) {
         track.id,
         clip.id,
         source.id,
+        source.path,
         source.channels,
+        track.muted,
+        track.solo,
+        clip.start,
+        clip.offset,
+        clip.duration,
+        clip.muted,
+      ].join(':'))
+      .join('|')
+  }
+
+  function trackMixSignature() {
+    return activeClips()
+      .map(({ track, clip }) => [
+        track.id,
+        clip.id,
         track.volume,
         track.pan,
         track.effects?.reverb ?? 0,
@@ -464,22 +484,16 @@ export function useEditorPlayback(options: PlaybackOptions) {
         track.effects?.delayTime ?? 0.24,
         track.effects?.clarity ?? 0,
         track.effects?.compressor ?? 0,
-        track.muted,
-        track.solo,
-        clip.start,
-        clip.offset,
-        clip.duration,
         clip.volume,
         clip.fadeIn,
         clip.fadeOut,
-        clip.muted,
       ].join(':'))
       .join('|')
   }
 
   function ensureAudioEntry(track: EditorTrack, clip: EditorClip, source: EditorSource) {
     const cached = audioEntries.get(clip.id)
-    if (cached && cached.sourceId === source.id) {
+    if (cached && cached.sourceId === source.id && cached.sourcePath === source.path) {
       connectEntryAudioGraph(cached, source)
       return cached
     }
@@ -497,18 +511,29 @@ export function useEditorPlayback(options: PlaybackOptions) {
       clipId: clip.id,
       trackId: track.id,
       sourceId: source.id,
+      sourcePath: source.path,
       audio,
       fallbackUrl: fallbackUrl && fallbackUrl !== primaryUrl ? fallbackUrl : null,
       graphEnabled: undefined,
       metadataReady: audio.readyState >= 1,
       metadataPromise: Promise.resolve(),
+      playPromise: null,
+      lastSeekAt: -Infinity,
     }
 
     audio.addEventListener('error', () => {
-      if (!entry.fallbackUrl || entry.audio.currentSrc === entry.fallbackUrl || entry.audio.src === entry.fallbackUrl) return
-      entry.metadataReady = false
-      entry.audio.src = entry.fallbackUrl
-      entry.audio.load()
+      if (audioEntries.get(entry.clipId) !== entry) return
+      if (entry.fallbackUrl && entry.audio.currentSrc !== entry.fallbackUrl && entry.audio.src !== entry.fallbackUrl) {
+        entry.metadataReady = false
+        entry.audio.src = entry.fallbackUrl
+        entry.audio.load()
+        return
+      }
+      if (intent.value === 'play' && activeClips().some(({ clip }) => (
+        clip.id === entry.clipId && clipIsActive(clip, currentTime.value)
+      ))) {
+        failPlayback(activeRequestId, new Error(audio.error?.message || ERROR_NO_LOADED_AUDIO))
+      }
     })
 
     entry.metadataPromise = createMetadataPromise(audio, entry)
@@ -518,13 +543,16 @@ export function useEditorPlayback(options: PlaybackOptions) {
     return entry
   }
 
-  function setAudioTime(audio: HTMLAudioElement, time: number) {
+  function setAudioTime(entry: ManagedAudio, time: number) {
+    const audio = entry.audio
     const maxTime = Number.isFinite(audio.duration) && audio.duration > 0
       ? Math.max(0, audio.duration - 0.01)
       : time
     const next = Math.max(0, Math.min(time, maxTime))
+    if (Math.abs(audio.currentTime - next) < 0.001) return
     try {
       audio.currentTime = next
+      entry.lastSeekAt = performance.now()
     } catch {
       // ignore early metadata timing errors
     }
@@ -566,6 +594,18 @@ export function useEditorPlayback(options: PlaybackOptions) {
     const entries = activeClips()
     const knownIds = new Set(entries.map(({ clip }) => clip.id))
     const audibleTrackIds = new Set(entries.map(({ track }) => track.id))
+    const waiting = playNow && (
+      (audioContext && audioContext.state !== 'running')
+      || entries.some(({ clip }) => {
+        if (!clipIsActive(clip, time)) return false
+        const audio = audioEntries.get(clip.id)?.audio
+        return audio && !audio.ended && (audio.seeking || audio.readyState < 3)
+      })
+    )
+
+    // Hold the whole mix while a decoder seeks/buffers. Seeking on every frame
+    // restarts slow WebKit seeks and can prevent the audio from ever catching up.
+    if (waiting) pauseAllAudios()
 
     for (const { track, clip, source } of entries) {
       const entry = ensureAudioEntry(track, clip, source)
@@ -573,16 +613,30 @@ export function useEditorPlayback(options: PlaybackOptions) {
       const volume = computeClipVolume(track, clip, time)
       applyTrackAudioSettings(entry, track, volume)
       if (!active) {
-        if (!entry.audio.paused) entry.audio.pause()
+        if (!entry.audio.paused) pauseEntry(entry)
         continue
       }
+      if (playNow && entry.audio.error) {
+        failPlayback(activeRequestId, new Error(entry.audio.error.message || ERROR_NO_LOADED_AUDIO))
+        return
+      }
+      // A completed source may be slightly ahead of the slowest track. Calling
+      // play() here would restart it at zero while the mix catches up.
+      if (playNow && entry.audio.ended) continue
 
       const mediaTime = clipMediaTime(clip, time)
-      if (Math.abs(entry.audio.currentTime - mediaTime) > 0.16) setAudioTime(entry.audio, mediaTime)
-      if (playNow && entry.audio.paused) {
-        void entry.audio.play().catch(() => undefined)
+      if (!waiting && !entry.audio.seeking && entry.audio.readyState >= 3
+        && performance.now() - entry.lastSeekAt >= 1000
+        && Math.abs(entry.audio.currentTime - mediaTime) > 0.16) {
+        setAudioTime(entry, mediaTime)
+      }
+      if (playNow && !waiting && entry.audio.paused) {
+        const id = activeRequestId
+        void playEntry(entry).catch((cause) => {
+          failPlayback(id, cause)
+        })
       } else if (!playNow && !entry.audio.paused) {
-        entry.audio.pause()
+        pauseEntry(entry)
       }
     }
 
@@ -681,23 +735,73 @@ export function useEditorPlayback(options: PlaybackOptions) {
     stopFollowScroll()
   }
 
+  function pauseEntry(entry: ManagedAudio) {
+    // Invalidate this operation before pause() rejects its pending play().
+    entry.playPromise = null
+    entry.audio.pause()
+  }
+
   function pauseAllAudios() {
-    audioEntries.forEach((entry) => {
-      entry.audio.pause()
-    })
+    audioEntries.forEach(pauseEntry)
   }
 
   function syncPauseAt(time: number) {
     pauseAllAudios()
     for (const { track, clip, source } of activeClips()) {
       const entry = ensureAudioEntry(track, clip, source)
-      setAudioTime(entry.audio, clipMediaTime(clip, time))
+      setAudioTime(entry, clipMediaTime(clip, time))
     }
   }
 
   function sampleCurrentTime() {
     if (status.value !== 'playing') return currentTime.value
-    return Math.max(0, performance.now() / 1000 - playbackAnchorTime)
+    const time = currentTime.value
+    const entries = activeClips()
+    const active = entries.filter(({ clip }) => clipIsActive(clip, time))
+    let next = performance.now() / 1000 - playbackAnchorTime
+    if (audioContext && audioContext.state !== 'running') {
+      next = time
+    } else if (active.length) {
+      // Use actual media progress, including clip offsets, instead of making
+      // stalled decoders chase a wall clock. The slowest track paces the mix.
+      next = Math.min(...active.map(({ clip }) => {
+        const audio = audioEntries.get(clip.id)?.audio
+        if (!audio) return time
+        if (audio.ended) return clip.start + clip.duration
+        if (audio.paused || audio.seeking || audio.readyState < 3) return time
+        return Math.min(clip.start + clip.duration, clip.start + audio.currentTime - clip.offset)
+      }))
+    }
+    // Wall time is only used across gaps. Do not skip the next clip when a
+    // frame is delayed, or start it halfway through its media.
+    for (const { clip } of entries) {
+      if (clip.start > time) next = Math.min(next, clip.start)
+    }
+    next = Math.max(time, next)
+    playbackAnchorTime = performance.now() / 1000 - next
+    return next
+  }
+
+  function playEntry(entry: ManagedAudio) {
+    if (entry.playPromise) return entry.playPromise
+    const pending = entry.audio.play().catch((cause) => {
+      // Only a play operation explicitly cancelled by pauseEntry is ignored.
+      if (entry.playPromise === pending) throw cause
+    }).finally(() => {
+      if (entry.playPromise === pending) entry.playPromise = null
+    })
+    entry.playPromise = pending
+    return pending
+  }
+
+  function failPlayback(id: number, cause: unknown) {
+    if (id !== activeRequestId) return
+    stopRaf()
+    playback.fail(id, cause instanceof Error ? cause.message : String(cause))
+    // Failure also cancels pending resume/play/metadata work. Their subsequent
+    // AbortErrors must not replace the original decoder or output error.
+    activeRequestId = playback.nextRequest()
+    pauseAllAudios()
   }
 
   function updateLevelMeter() {
@@ -747,6 +851,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
   }
 
   function syncPausedAudiosToTime(time: number) {
+    const id = activeRequestId
     const nextTime = clampTime(time)
     playback.setCurrentTime(nextTime)
     playbackAnchorTime = performance.now() / 1000 - nextTime
@@ -755,34 +860,35 @@ export function useEditorPlayback(options: PlaybackOptions) {
     const entries = activeClips()
     for (const { track, clip, source } of entries) {
       const entry = ensureAudioEntry(track, clip, source)
-      const applySeek = () => setAudioTime(entry.audio, clipMediaTime(clip, nextTime))
+      const applySeek = () => setAudioTime(entry, clipMediaTime(clip, nextTime))
       if (entry.metadataReady) applySeek()
       else void entry.metadataPromise.then(() => {
-        if (entry.sourceId !== source.id) return
+        if (id !== activeRequestId || audioEntries.get(clip.id) !== entry) return
         applySeek()
       })
     }
   }
 
-  async function syncActiveAudios(playNow: boolean, targetTime = currentTime.value, expectedRequestId = activeRequestId) {
+  async function syncActiveAudios(targetTime: number, expectedRequestId: number) {
+    pauseAllAudios()
     const entries = activeClips()
     if (!entries.length) {
-      pauseAllAudios()
+      pauseInactiveAudios(new Set())
       return 0
     }
 
     const ctx = ensureAudioContext()
-    if (playNow && ctx && ctx.state !== 'running') {
-      await ctx.resume().catch(() => undefined)
+    if (ctx && ctx.state !== 'running') {
+      await ctx.resume()
     }
+    if (expectedRequestId !== activeRequestId) return 0
+    if (ctx && ctx.state !== 'running') throw new Error(ERROR_AUDIO_CONTEXT)
 
     const activeIds = new Set(entries.map(({ clip }) => clip.id))
     pauseInactiveAudios(activeIds)
 
     const managed = entries.map(({ track, clip, source }) => ({
-      track,
       clip,
-      source,
       entry: ensureAudioEntry(track, clip, source),
     }))
 
@@ -791,26 +897,21 @@ export function useEditorPlayback(options: PlaybackOptions) {
     playbackAnchorTime = performance.now() / 1000 - nextTime
 
     for (const { entry, clip } of managed) {
-      setAudioTime(entry.audio, clipMediaTime(clip, nextTime))
+      setAudioTime(entry, clipMediaTime(clip, nextTime))
       if (!entry.metadataReady) {
         void entry.metadataPromise.then(() => {
-          if (expectedRequestId !== activeRequestId) return
-          setAudioTime(entry.audio, clipMediaTime(clip, nextTime))
+          if (expectedRequestId !== activeRequestId || audioEntries.get(clip.id) !== entry) return
+          setAudioTime(entry, clipMediaTime(clip, nextTime))
         })
       }
     }
 
     applyClipStates(nextTime, false)
 
-    if (!playNow) return managed.length
-
     const activeManaged = managed.filter(({ clip }) => clipIsActive(clip, nextTime))
-    const results = await Promise.allSettled(activeManaged.map(({ entry }) => entry.audio.play()))
+    await Promise.all(activeManaged.map(({ entry }) => playEntry(entry)))
     if (expectedRequestId !== activeRequestId) return 0
-    if (activeManaged.length && !results.some((result) => result.status === 'fulfilled')) {
-      const firstError = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
-      throw firstError?.reason || new Error(ERROR_NO_LOADED_AUDIO)
-    }
+    playbackAnchorTime = performance.now() / 1000 - nextTime
     return managed.length
   }
 
@@ -841,9 +942,9 @@ export function useEditorPlayback(options: PlaybackOptions) {
     const id = playback.beginRequest('play', 'starting')
     activeRequestId = id
 
-    const playableCount = await syncActiveAudios(true, offset, id).catch((cause) => {
+    const playableCount = await syncActiveAudios(offset, id).catch((cause) => {
       if (id !== activeRequestId) return -1
-      playback.fail(id, cause instanceof Error ? cause.message : String(cause))
+      failPlayback(id, cause)
       return 0
     })
 
@@ -892,6 +993,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
     const time = clampTime(sampleCurrentTime())
     playback.setCurrentTime(time)
     applyClipStates(time, true)
+    if (intent.value !== 'play' || status.value !== 'playing') return
     updateLevelMeter()
     followPlayhead()
 
@@ -900,7 +1002,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
       if (loop.value && intent.value === 'play') {
         const id = playback.beginRequest('play', 'starting')
         activeRequestId = id
-        void syncActiveAudios(true, 0, id).then((count) => {
+        void syncActiveAudios(0, id).then((count) => {
           if (id !== activeRequestId || intent.value !== 'play') return
           if (count <= 0) {
             playback.fail(id, ERROR_NO_LOADED_AUDIO)
@@ -913,7 +1015,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
           stopRaf()
           rafId = requestAnimationFrame(tick)
         }).catch((cause) => {
-          playback.fail(id, cause instanceof Error ? cause.message : String(cause))
+          failPlayback(id, cause)
         })
         return
       }
@@ -927,13 +1029,15 @@ export function useEditorPlayback(options: PlaybackOptions) {
 
   function seek(time: number) {
     const next = clampTime(time)
+    const playing = intent.value === 'play'
+    const id = playback.beginRequest(playing ? 'play' : 'pause', playing ? 'starting' : 'paused')
+    activeRequestId = id
+    stopRaf()
     syncPausedAudiosToTime(next)
 
-    if (intent.value === 'play') {
+    if (playing) {
       followPlayhead('seek')
-      const id = playback.beginRequest('play', 'starting')
-      activeRequestId = id
-      void syncActiveAudios(true, next, id).then((count) => {
+      void syncActiveAudios(next, id).then((count) => {
         if (id !== activeRequestId || intent.value !== 'play') return
         if (count <= 0) {
           playback.fail(id, ERROR_NO_LOADED_AUDIO)
@@ -943,19 +1047,24 @@ export function useEditorPlayback(options: PlaybackOptions) {
         stopRaf()
         rafId = requestAnimationFrame(tick)
       }).catch((cause) => {
-        playback.fail(id, cause instanceof Error ? cause.message : String(cause))
+        failPlayback(id, cause)
       })
     }
   }
 
   function applyMasterVolume() {
     applyMasterAudioSettings()
-    applyClipStates(currentTime.value, status.value === 'playing')
+    for (const { track, clip, source } of activeClips()) {
+      const entry = ensureAudioEntry(track, clip, source)
+      applyTrackAudioSettings(entry, track, computeClipVolume(track, clip, currentTime.value))
+    }
   }
 
   watch(() => editor.masterVolume, () => {
     applyMasterVolume()
   })
+
+  watch(trackMixSignature, applyMasterVolume)
 
   watch(() => editor.masterPan, () => {
     applyMasterAudioSettings()
@@ -976,7 +1085,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
       if (intent.value === 'play') {
         const id = playback.beginRequest('play', 'starting')
         activeRequestId = id
-        void syncActiveAudios(true, currentTime.value, id).then((count) => {
+        void syncActiveAudios(currentTime.value, id).then((count) => {
           if (id !== activeRequestId || intent.value !== 'play') return
           if (count <= 0) {
             playback.fail(id, ERROR_NO_LOADED_AUDIO)
@@ -986,7 +1095,7 @@ export function useEditorPlayback(options: PlaybackOptions) {
           stopRaf()
           rafId = requestAnimationFrame(tick)
         }).catch((cause) => {
-          playback.fail(id, cause instanceof Error ? cause.message : String(cause))
+          failPlayback(id, cause)
         })
       } else {
         syncPausedAudiosToTime(currentTime.value)
