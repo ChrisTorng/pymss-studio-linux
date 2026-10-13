@@ -67,17 +67,15 @@ function backendInstalled(backend: RuntimeBackend) {
 
 const runtimeBackendChoices = computed(() => {
   const { isMac, isAppleSilicon } = runtimePlatform.value
+  const backend: RuntimeBackend = isAppleSilicon ? 'mlx' : 'cpu'
   const items: Array<{ value: RuntimeBackend; label: string; hint: string }> = [
-    { value: 'cpu', label: runtimeBackendName('cpu'), hint: t('onboarding.runtimeCpu') },
+    { value: backend, label: runtimeBackendName(backend), hint: t(isAppleSilicon ? 'onboarding.runtimeMlx' : 'onboarding.runtimeCpu') },
   ]
   if (!isMac) {
     items.push(
       { value: 'cuda', label: runtimeBackendName('cuda'), hint: t('onboarding.runtimeCuda') },
       { value: 'rocm', label: runtimeBackendName('rocm'), hint: t('onboarding.runtimeRocm') },
     )
-  }
-  if (isAppleSilicon) {
-    items.push({ value: 'mlx', label: runtimeBackendName('mlx'), hint: t('onboarding.runtimeMlx') })
   }
   return items.map((item) => ({
     ...item,
@@ -157,7 +155,7 @@ const stepList = computed(() => [
     key: 'runtime',
     icon: HardwareChipOutline,
     title: t('onboarding.runtimeTitle'),
-    description: t('onboarding.runtimeDescription'),
+    description: t(app.runtimeManagementSupported ? 'onboarding.runtimeDescription' : 'settings.runtimeManagementReadOnlyHint'),
   },
 ])
 
@@ -169,7 +167,7 @@ const canGoNext = computed(() => {
   if (currentStep.value === 'dataDir') {
     return !checkingModelDir.value && !isModelDirMigrating.value && modelDirMigrationState.value.status !== 'confirm'
   }
-  if (currentStep.value === 'runtime' && runtimeChecking.value) return false
+  if (currentStep.value === 'runtime' && app.runtimeManagementSupported && runtimeChecking.value) return false
   return true
 })
 const modelDirMigrationVisible = computed(() => modelDirMigrationState.value.status !== 'idle' && modelDirMigrationState.value.status !== 'confirm')
@@ -307,7 +305,7 @@ async function finishOnboarding(event?: MouseEvent) {
   const backend = selectedBackend.value
   const alreadyReady = app.runtimeReadyForBackend(backend)
   const alreadyInstalled = backendInstalled(backend)
-  const needsRuntimeSettings = !alreadyReady
+  const needsRuntimeSettings = app.runtimeManagementSupported && !alreadyReady
   await runRippleViewTransition(async () => {
     await settings.markStartupOnboardingCompleted()
     if (needsRuntimeSettings) {
@@ -316,7 +314,7 @@ async function finishOnboarding(event?: MouseEvent) {
     emit('completed')
   }, origin)
   // Runtime errors are handled by the store and surfaced in Settings.
-  if (alreadyReady) return
+  if (!app.runtimeManagementSupported || alreadyReady) return
   if (alreadyInstalled) {
     // Installed but not active — switching is enough, no need to download it again.
     const installed = app.runtimeInfo?.installedEnvironments?.find((entry) => entry.backend === backend)
@@ -333,7 +331,7 @@ onMounted(() => {
     .finally(() => {
       runtimeChecking.value = false
     })
-  void app.loadRuntimeCoreVersions().catch(() => {})
+  if (app.runtimeManagementSupported) void app.loadRuntimeCoreVersions().catch(() => {})
 })
 </script>
 
@@ -463,6 +461,13 @@ onMounted(() => {
           </section>
 
           <section v-else-if="currentStep === 'runtime'" class="onboarding-section onboarding-runtime-section">
+            <div v-if="!app.runtimeManagementSupported" class="onboarding-runtime-locked" role="status">
+              <div class="onboarding-runtime-locked__copy">
+                <strong>{{ t('settings.runtimeManagementWindowsOnly') }}</strong>
+                <span>{{ t('settings.runtimeManagementReadOnlyHint') }}</span>
+              </div>
+            </div>
+            <template v-else>
             <div v-if="runtimeChecking" class="onboarding-runtime-locked">
               <n-spin size="small" />
               <div class="onboarding-runtime-locked__copy">
@@ -519,6 +524,7 @@ onMounted(() => {
                 <span>{{ t('onboarding.runtimeAlreadyReady') }}</span>
               </template>
             </p>
+            </template>
           </section>
         </div>
 

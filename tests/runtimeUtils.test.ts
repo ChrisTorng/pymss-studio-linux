@@ -16,7 +16,17 @@ import {
   runtimeManifestStatus,
   runtimeLoadError,
   runtimeSizeHint,
+  supportsRuntimeManagement,
 } from '../src/utils/runtime.ts'
+
+test('runtime management is available only on Windows regardless of browser platform', () => {
+  assert.equal(supportsRuntimeManagement({ platform: 'win32' }), true)
+  assert.equal(supportsRuntimeManagement({ platform: 'Win32' }), true)
+  assert.equal(supportsRuntimeManagement({ platform: 'windows' }), true)
+  assert.equal(supportsRuntimeManagement({ platform: 'darwin' }), false)
+  assert.equal(supportsRuntimeManagement({ platform: 'linux' }), false)
+  assert.equal(supportsRuntimeManagement({ platform: 'unknown' }), false)
+})
 
 test('live probe diagnostics take priority while older runtime responses remain readable', () => {
   assert.equal(runtimeLoadError({ liveProbeError: { code: 'PYTHON_START_FAILED', message: 'Python could not start.' } }, { torchError: 'error:old failure' }), 'Python could not start.')
@@ -292,9 +302,16 @@ test('macOS is decided by architecture, not by GPU vendor', () => {
 test('undetectable hardware yields no recommendation at all', () => {
   // null means "no opinion" — the UI must keep offering every backend, because a missed
   // card would otherwise lock a user out of the backend they actually need.
-  assert.equal(recommendedRuntimeBackend({ platform: 'win32', gpuVendors: [] }), null)
-  assert.equal(recommendedRuntimeBackend({ platform: 'win32' }), null)
-  assert.equal(recommendedRuntimeBackend(null), null)
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { platform: '' } })
+  try {
+    assert.equal(recommendedRuntimeBackend({ platform: 'win32', gpuVendors: [] }), null)
+    assert.equal(recommendedRuntimeBackend({ platform: 'win32' }), null)
+    assert.equal(recommendedRuntimeBackend(null), null)
+  } finally {
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor)
+    else delete (globalThis as { navigator?: unknown }).navigator
+  }
 })
 
 test('manifest status compares the environment against the shipped manifest', () => {

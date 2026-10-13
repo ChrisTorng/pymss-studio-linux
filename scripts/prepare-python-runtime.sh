@@ -62,8 +62,16 @@ elif kind == "torch-index-url":
 PY
 }
 
+runtime_python() {
+  if [[ "$OSTYPE" == darwin* ]]; then
+    PYTHONHOME="$RUNTIME_HOME" "$PY" "$@"
+  else
+    env -u PYTHONHOME "$PY" "$@"
+  fi
+}
+
 verify_bootstrap_runtime() {
-  PYTHONHOME="$RUNTIME_HOME" "$PY" - <<'PY'
+  runtime_python - <<'PY'
 import requests
 import socks
 from pip._vendor.packaging.requirements import Requirement
@@ -127,36 +135,36 @@ else
 fi
 
 if [[ "$OSTYPE" == darwin* && -z "$INITIAL_BACKEND" && "$VARIANT" != "mlx" && "$VARIANT" != "mps" ]]; then
-  PYTHONHOME="$RUNTIME_HOME" "$PY" -m ensurepip --upgrade
-  PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --upgrade pip setuptools wheel
-  PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --no-cache-dir "${MANIFEST_BOOTSTRAP_REQUIREMENTS[@]}"
+  runtime_python -m ensurepip --upgrade
+  runtime_python -m pip install --upgrade pip setuptools wheel
+  runtime_python -m pip install --no-cache-dir "${MANIFEST_BOOTSTRAP_REQUIREMENTS[@]}"
   bash "$(dirname "$0")/prune-python-runtime.sh" "$RUNTIME_DIR" --keep-venv
-  PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip --version
+  runtime_python -m pip --version
   verify_bootstrap_runtime
   exit 0
 fi
 
-PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --upgrade pip setuptools wheel
-PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --no-cache-dir "${MANIFEST_BOOTSTRAP_REQUIREMENTS[@]}"
+runtime_python -m pip install --upgrade pip setuptools wheel
+runtime_python -m pip install --no-cache-dir "${MANIFEST_BOOTSTRAP_REQUIREMENTS[@]}"
 
 if [[ -z "$TORCH_INDEX_URL" ]]; then
-  PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --no-cache-dir "$TORCH_REQUIREMENT"
+  runtime_python -m pip install --no-cache-dir "$TORCH_REQUIREMENT"
 else
-  PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --no-cache-dir "$TORCH_REQUIREMENT" --index-url "$TORCH_INDEX_URL"
+  runtime_python -m pip install --no-cache-dir "$TORCH_REQUIREMENT" --index-url "$TORCH_INDEX_URL"
 fi
-PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --no-cache-dir --only-binary=:all: --prefer-binary "${MANIFEST_COMMON_REQUIREMENTS[@]}"
+runtime_python -m pip install --no-cache-dir --only-binary=:all: --prefer-binary "${MANIFEST_COMMON_REQUIREMENTS[@]}"
 if [[ "${#MANIFEST_BACKEND_EXTRAS[@]}" -gt 0 ]]; then
-  PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --no-cache-dir "${MANIFEST_BACKEND_EXTRAS[@]}"
+  runtime_python -m pip install --no-cache-dir "${MANIFEST_BACKEND_EXTRAS[@]}"
 fi
-PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip install --no-cache-dir --upgrade "$MANIFEST_PYMSS_REQUIREMENT" "$MANIFEST_PYMSS_CORE_REQUIREMENT"
+runtime_python -m pip install --no-cache-dir --upgrade "$MANIFEST_PYMSS_REQUIREMENT" "$MANIFEST_PYMSS_CORE_REQUIREMENT"
 
 bash "$(dirname "$0")/prune-python-runtime.sh" "$RUNTIME_DIR" --keep-venv
-PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip --version
+runtime_python -m pip --version
 verify_bootstrap_runtime
 
 if [[ "$OSTYPE" == darwin* && "$VARIANT" == "mlx" ]]; then
   mkdir -p "$RUNTIME_ENVS_DIR"
-  PYTHONHOME="$RUNTIME_HOME" "$PY" - "$RUNTIME_ENVS_DIR" "$(dirname "$0")/../python/runtime-manifest.json" <<'PY'
+  runtime_python - "$RUNTIME_ENVS_DIR" "$(dirname "$0")/../python/runtime-manifest.json" <<'PY'
 import json
 import importlib.util
 import platform
@@ -201,7 +209,7 @@ state = {
 )
 PY
 fi
-PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RUNTIME_HOME" "$PY" - <<'PY'
+PYTHONDONTWRITEBYTECODE=1 runtime_python - <<'PY'
 import importlib.util
 import pymss, pymss.graph, torch, librosa, av, yaml, tqdm
 print('pymss', getattr(pymss, '__version__', 'unknown'), pymss.__file__)
@@ -210,6 +218,6 @@ print('librosa', librosa.__version__)
 print('av', av.__version__)
 print('mlx', importlib.util.find_spec('mlx') is not None)
 PY
-PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RUNTIME_HOME" "$PY" "$(dirname "$0")/../python/runtime_audio_probe.py"
+PYTHONDONTWRITEBYTECODE=1 runtime_python "$(dirname "$0")/../python/runtime_audio_probe.py"
 bash "$(dirname "$0")/prune-python-runtime.sh" "$RUNTIME_DIR" --keep-venv
-PYTHONHOME="$RUNTIME_HOME" "$PY" -m pip --version
+runtime_python -m pip --version

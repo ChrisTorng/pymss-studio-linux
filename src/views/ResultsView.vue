@@ -151,10 +151,6 @@ async function openInEditor(item: SeparationTask) {
 }
 
 // 删除结果时回收当前结果对应的输出文件；分层输出的结果目录仅在已空时清理。
-function trashTargets(item: SeparationTask) {
-  return task.resultTrashTargets(item)
-}
-
 function trashEmptyDirs(item: SeparationTask) {
   return task.resultTrashEmptyDirs(item)
 }
@@ -275,12 +271,7 @@ function handleCleanupOrphanedEditorProjects() {
 }
 
 function trashTargetsForItems(items: SeparationTask[]) {
-  const seen = new Set<string>()
-  return items.flatMap((item) => trashTargets(item)).filter((path) => {
-    if (seen.has(path)) return false
-    seen.add(path)
-    return true
-  })
+  return task.resultTrashTargetsForTasks(items)
 }
 
 function trashEmptyDirsForItems(items: SeparationTask[]) {
@@ -348,10 +339,11 @@ function handleRemoveResult(group: ResultGroup) {
       }
       if (!await ensureLinkedEditorProjectsClosed(items)) return false
 
-      const targets = trashTargetsForItems(items)
+      const { paths: targets, retained } = trashTargetsForItems(items)
       if (!targets.length) {
         if (!await finishRemove()) return false
-        message.warning(t('results.removeNoFilesSingle'))
+        if (retained) message.success(t('results.removeFilesRetained', { count: retained }))
+        else message.warning(t('results.removeNoFilesSingle'))
         return
       }
 
@@ -359,7 +351,8 @@ function handleRemoveResult(group: ResultGroup) {
         const result = await task.trashResultPaths(targets, trashEmptyDirsForItems(items))
         if (!result.failed.length) {
           if (!await finishRemove()) return false
-          message.success(t('results.removeFilesSuccessSingle'))
+          if (retained) message.success(t('results.removeFilesRetained', { count: retained }))
+          else message.success(t('results.removeFilesSuccessSingle'))
           return
         }
 
@@ -372,7 +365,7 @@ function handleRemoveResult(group: ResultGroup) {
         if (result.failed.length === targets.length) {
           message.warning(t('results.removeFilesAllFailedListOnly'))
         } else {
-          message.warning(t('results.removeFilesPartialListOnly', { count: result.failed.length }))
+          message.warning(t('results.removeFilesPartialListOnly', { count: result.failed.length + retained }))
         }
       } catch (error) {
         const removeListOnly = await confirmRemoveListOnly(targets.length, targets.length, 'single')
@@ -424,10 +417,11 @@ function handleRemoveSelected() {
       }
       if (!await ensureLinkedEditorProjectsClosed(items)) return false
 
-      const targets = trashTargetsForItems(items)
+      const { paths: targets, retained } = trashTargetsForItems(items)
       if (!targets.length) {
         if (!await finishRemove(true)) return false
-        message.warning(t('results.removeNoFilesMultiple'))
+        if (retained) message.success(t('results.removeFilesRetained', { count: retained }))
+        else message.warning(t('results.removeNoFilesMultiple'))
         return
       }
 
@@ -435,7 +429,8 @@ function handleRemoveSelected() {
         const result = await task.trashResultPaths(targets, trashEmptyDirsForItems(items))
         if (!result.failed.length) {
           if (!await finishRemove(true)) return false
-          message.success(t('results.removeFilesSuccessMultiple'))
+          if (retained) message.success(t('results.removeFilesRetained', { count: retained }))
+          else message.success(t('results.removeFilesSuccessMultiple'))
           return
         }
 
@@ -448,7 +443,7 @@ function handleRemoveSelected() {
         if (result.failed.length === targets.length) {
           message.warning(t('results.removeFilesAllFailedListOnly'))
         } else {
-          message.warning(t('results.removeFilesPartialListOnly', { count: result.failed.length }))
+          message.warning(t('results.removeFilesPartialListOnly', { count: result.failed.length + retained }))
         }
       } catch (error) {
         const removeListOnly = await confirmRemoveListOnly(targets.length, targets.length, 'multiple')
@@ -498,10 +493,11 @@ function handleClearResults() {
       }
       if (!await ensureLinkedEditorProjectsClosed(items)) return false
 
-      const targets = trashTargetsForItems(items)
+      const { paths: targets, retained } = trashTargetsForItems(items)
       if (!targets.length) {
         if (!await finishClear(true)) return false
-        message.warning(t('results.removeNoFilesMultiple'))
+        if (retained) message.success(t('results.removeFilesRetained', { count: retained }))
+        else message.warning(t('results.removeNoFilesMultiple'))
         return
       }
 
@@ -509,7 +505,8 @@ function handleClearResults() {
         const result = await task.trashResultPaths(targets, trashEmptyDirsForItems(items))
         if (!result.failed.length) {
           if (!await finishClear(true)) return false
-          message.success(t('results.removeFilesSuccessMultiple'))
+          if (retained) message.success(t('results.removeFilesRetained', { count: retained }))
+          else message.success(t('results.removeFilesSuccessMultiple'))
           return
         }
 
@@ -522,7 +519,7 @@ function handleClearResults() {
         if (result.failed.length === targets.length) {
           message.warning(t('results.removeFilesAllFailedListOnly'))
         } else {
-          message.warning(t('results.removeFilesPartialListOnly', { count: result.failed.length }))
+          message.warning(t('results.removeFilesPartialListOnly', { count: result.failed.length + retained }))
         }
       } catch (error) {
         const removeListOnly = await confirmRemoveListOnly(targets.length, targets.length, 'multiple')

@@ -457,3 +457,64 @@ for (const mode of ['model', 'workflow']) {
     })
   }
 }
+
+for (const platform of ['linux', 'darwin']) {
+  test(`${platform} output selection preserves significant trailing spaces in native directories`, async () => {
+    storage()
+    const task = await newStore(platform)
+    settings.outputDir = '/tmp/default '
+    assert.equal(task.separateOutputDir, '/tmp/default ')
+    task.separateTemporaryOutputDir = '/tmp/selected '
+    assert.equal(task.separateOutputDir, '/tmp/selected ')
+    const run = await task.startWorkflowInference(workflow, { outputDir: '/tmp/chosen ', outputLayout: 'flat' })
+    assert.equal(run.tasks[0].output, '/tmp/chosen ')
+    assert.equal(run.tasks[0].jobOutput, '/tmp/chosen ')
+    const bindings = { inputs: { input: { files: ['/audio/song.wav'] } }, outputs: {},
+      outputDirectory: '/tmp/workbench ', primaryInput: 'input', outputLayout: 'folders' }
+    const prepared = (await task.startWorkbenchInference({ ...workflow, updatedAt: 1 }, bindings)).tasks[0]
+    assert.equal(prepared.output, '/tmp/workbench /song')
+    assert.equal(prepared.runConfig.workbench.outputs['save:split:vocals'], '/tmp/workbench /song')
+  })
+
+  test(`simple workbench ${platform} folders preserve native backslashes through submission and retry`, async () => {
+    storage()
+    const task = await newStore(platform)
+    settings.outputDir = '/tmp/default'
+    const root = '/tmp/results\\'
+    const bindings = { inputs: { input: { files: ['/audio/AC\\DC.wav'] } }, outputs: {},
+      outputDirectory: root, primaryInput: 'input', outputLayout: 'folders' }
+    const original = (await task.startWorkbenchInference({ ...workflow, updatedAt: 1 }, bindings)).tasks[0]
+    const directory = `${root}/AC\\DC`
+    assert.equal(original.output, directory)
+    assert.equal(original.runConfig.workbench.outputs['save:split:vocals'], directory)
+    original.status = 'failed'
+    settings.outputDir = '/tmp/changed'
+    const retried = await task.retryTask(original.id)
+    assert.equal(retried.output, directory)
+    assert.deepEqual(retried.runConfig.workbench.outputs, original.runConfig.workbench.outputs)
+  })
+
+  test(`legacy ${platform} files-only responses preserve native paths and filenames`, async () => {
+    const values = storage()
+    const task = await newStore(platform)
+    task.clearInputFiles()
+    task.addInputFiles(['/audio/song.mix.wav'])
+    const root = '/tmp/results\\'
+    const original = (await task.startWorkflowInference(workflow, { outputDir: root, outputLayout: 'folders' })).tasks[0]
+    original.outputPrefix = undefined
+    task.handleWorkerEvent({ type: 'task_done', taskId: original.id,
+      payload: { outputDir: root, outputRoot: root, files: ['vocals.wav', 'parts/voice.flac', 'tail.wav ', 'AC\\DC.wav', 'song.mix_vocals.wav', '../input.wav'], outputs: [] } })
+    const expected = [`${root}/vocals.wav`, `${root}/parts/voice.flac`, `${root}/tail.wav `, `${root}/AC\\DC.wav`, `${root}/song.mix_vocals.wav`]
+    assert.deepEqual(original.outputs.map(output => output.path), expected)
+    assert.equal(original.outputs.at(-1).stem, 'vocals')
+    assert.deepEqual(task.resultTrashTargets(original), expected)
+    await waitForSave()
+    const restored = (await newStore(platform)).getTaskById(original.id)
+    assert.deepEqual(restored.outputs.map(output => output.path), expected)
+    const data = JSON.parse(values.get('pymss-studio:task-history'))
+    data.tasks.find(item => item.id === original.id).outputs = []
+    globalThis.localStorage.setItem('pymss-studio:task-history', JSON.stringify(data))
+    const legacyRestored = (await newStore(platform)).getTaskById(original.id)
+    assert.deepEqual(legacyRestored.outputs.map(output => output.path), expected)
+  })
+}

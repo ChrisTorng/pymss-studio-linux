@@ -74,7 +74,7 @@ const runtimeManifestSyncRequired = computed(() => runtimeCoreSyncAvailable(
   activeRuntime.value,
   app.runtimeInfo?.manifestVersion,
 ))
-const runtimeCoreUpdateAvailable = computed(() => runtimeVersionUpdateAvailable.value || runtimeManifestSyncRequired.value)
+const runtimeCoreUpdateAvailable = computed(() => app.runtimeManagementSupported && (runtimeVersionUpdateAvailable.value || runtimeManifestSyncRequired.value))
 const runtimeCorePromptContent = computed(() => t(
   runtimeManifestSyncRequired.value && !runtimeVersionUpdateAvailable.value
     ? 'settings.runtimeCoreStartupSyncPrompt'
@@ -185,6 +185,7 @@ async function openManualUpdate() {
 }
 
 function showRuntimeCorePrompt() {
+  if (!app.runtimeManagementSupported) return
   if (runtimeAutoSyncActive.value || runtimeCorePromptShown.value || !bootReady.value || isStandaloneRoute.value || !runtimeCoreUpdateAvailable.value) return
   if (runtimeManifestSyncRequired.value && !runtimeAutoSyncAttempted.value) return
   runtimeCorePromptShown.value = true
@@ -193,7 +194,8 @@ function showRuntimeCorePrompt() {
 
 async function synchronizeRuntimeManifest() {
   if (
-    runtimeAutoSyncAttempted.value
+    !app.runtimeManagementSupported
+    || runtimeAutoSyncAttempted.value
     || runtimeAutoSyncActive.value
     || !bootReady.value
     || showStartupOnboarding.value

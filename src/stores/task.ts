@@ -27,7 +27,7 @@ import {
 import { normalizeStemOutputs, stemFromOutputPath, type StemOutput } from '@/utils/stemOutputs'
 import { normalizeConcurrentSeparations } from '@/features/tasks/concurrency'
 import { isMainTaskOwner } from '@/utils/taskOwner'
-import { cloneWorkflow, prepareWorkbenchRun, type WorkflowRuntimeBindings, type WorkflowWorkbenchSnapshot, type WorkflowNodeState } from '@/workflows/workbench'
+import { cloneWorkflow, prepareWorkbenchRun, workflowInputNodes, type WorkflowRuntimeBindings, type WorkflowWorkbenchSnapshot, type WorkflowNodeState } from '@/workflows/workbench'
 import { SEPARATE_MODEL_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
 
 export type { TaskStatus } from '@/features/tasks/lifecycle'
@@ -244,8 +244,9 @@ function normalizeOutputPath(value?: string | null) {
   return value && value.trim() ? value : 'outputs'
 }
 
-function resolveOutputDirectory(value?: string | null, fallback?: string | null) {
-  return value?.trim() || fallback?.trim() || 'outputs'
+function resolveOutputDirectory(value?: string | null, fallback?: string | null, windows = false) {
+  const directory = value && value.trim() ? value : fallback && fallback.trim() ? fallback : 'outputs'
+  return windows || !directory.startsWith('/') ? directory.trim() : directory
 }
 
 function normalizeTimestamp(value: unknown) {
@@ -274,46 +275,75 @@ function inputStemSegment(input: string, fallback: string, windows: boolean) {
     ?.replace(windows ? /\.[^/.\\]+$/ : /\.[^/.]+$/, '') || fallback
 }
 
-function outputsFromFiles(outputDir: string, files: string[], outputFormat = 'wav', outputPrefix?: string, inputPath?: string): StemOutput[] {
+function outputsFromFiles(outputDir: string, files: string[], outputFormat = 'wav', outputPrefix?: string, inputPath?: string, windows = /^[A-Za-z]:|^\\\\/.test(outputDir)): StemOutput[] {
   if (!files?.length) return []
-  const separator = outputDir.includes('\\') ? '\\' : '/'
-  const base = outputDir.replace(/[\\/]$/, '')
-  return files.map((file) => {
-    const rawPath = String(file || '').trim()
-    const rawStemName = rawPath.split(/[/\\]/).pop()?.replace(/\.[^/.\\]+$/, '') || ''
+  return files.flatMap((file) => {
+    const rawPath = String(file || '')
+    const parts = rawPath.split(windows ? /[/\\]/ : /[/]/)
+    if (!rawPath || parts.some(part => part === '.' || part === '..')) return []
+    const leaf = parts.at(-1) || ''
+    const extension = leaf.match(windows ? /\.[^/.\\]+$/ : /\.[^/.]+$/)?.[0] || ''
+    const rawStemName = extension ? leaf.slice(0, -extension.length) : leaf
     const outputFileName = outputPrefix ? `${outputPrefix}_${rawStemName}` : rawStemName
-    const isAbsolutePath = /^(?:[A-Za-z]:[\\/]|[\\/]{1,2})/.test(rawPath)
-    return {
-      stem: stemFromOutputPath(rawStemName, inputPath),
-      path: isAbsolutePath ? rawPath : `${base}${separator}${outputFileName}.${outputFormat}`,
-    }
+    const isAbsolutePath = windows ? /^(?:[A-Za-z]:[\\/]|[\\/]{2})/.test(rawPath) : rawPath.startsWith('/')
+    const relativeParent = rawPath.slice(0, rawPath.length - leaf.length)
+    return [{
+      stem: stemFromOutputPath(leaf, inputPath, windows),
+      path: isAbsolutePath ? rawPath : joinOutputPath(outputDir, `${relativeParent}${outputFileName}${extension || `.${outputFormat}`}`, windows),
+    }]
   })
 }
 
-function parentDir(path: string) {
-  const trimmed = normalizeOutputPath(path).replace(/[\\/]$/, '')
-  const index = Math.max(trimmed.lastIndexOf('\\'), trimmed.lastIndexOf('/'))
-  return index > 0 ? trimmed.slice(0, index) : ''
+function cleanupPath(path: string, windows: boolean) {
+  let normalized = windows ? path.replace(/\\/g, '/') : path
+  if (windows) {
+    normalized = normalized.replace(/^\/\/\?\/UNC\//i, '//').replace(/^\/\/\?\/([A-Za-z]:\/)/, '$1')
+  }
+  return normalized.replace(/\/+$/, '') || (normalized.startsWith('/') ? '/' : '')
 }
 
-function samePath(a?: string, b?: string) {
-  const left = normalizeOutputPath(a || '').replace(/[\\/]$/, '')
-  const right = normalizeOutputPath(b || '').replace(/[\\/]$/, '')
-  return Boolean(left && right && left.toLowerCase() === right.toLowerCase())
+function parentDir(path: string, windows: boolean) {
+  const normalized = cleanupPath(path, windows)
+  const index = normalized.lastIndexOf('/')
+  return index > 0 ? normalized.slice(0, index) : ''
 }
 
-function cleanupDirChain(path: string, stopAt?: string) {
+function pathKey(path: string, windows: boolean) {
+  const normalized = cleanupPath(path, windows)
+  const drive = windows ? normalized.match(/^[A-Za-z]:/)?.[0] || '' : ''
+  let prefix = ''
+  if (drive) prefix = `${drive}/`
+  else if (normalized.startsWith('/')) prefix = windows && normalized.startsWith('//') ? '//' : '/'
+  const segments: string[] = []
+  const rootDepth = prefix === '//' ? 2 : 0
+  for (const part of (drive ? normalized.slice(2) : normalized).split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') {
+      if (segments.length > rootDepth && segments.at(-1) !== '..') segments.pop()
+      else if (!prefix) segments.push(part)
+    } else segments.push(part)
+  }
+  const key = prefix + segments.join('/')
+  return windows ? key.toLowerCase() : key
+}
+
+function samePath(a: string | undefined, b: string | undefined, windows: boolean) {
+  return Boolean(a && b && pathKey(a, windows) === pathKey(b, windows))
+}
+
+function cleanupDirChain(path: string, stopAt: string | undefined, windows: boolean) {
   const dirs: string[] = []
-  const seen = new Set<string>()
-  const stop = stopAt?.trim()
-  let current = normalizeOutputPath(path).replace(/[\\/]$/, '')
-  while (current && !(stop && samePath(current, stop))) {
-    const key = current.toLowerCase()
-    if (seen.has(key)) break
+  const absolute = windows ? /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/ : /^\//
+  if (!stopAt || !absolute.test(path) || !absolute.test(stopAt)) return dirs
+  const stop = cleanupPath(stopAt, windows)
+  let current = cleanupPath(path, windows)
+  if ([stop, current].some(value => value.split('/').some(part => part === '.' || part === '..'))) return dirs
+  const stopKey = pathKey(stop, windows)
+  const prefix = stopKey.endsWith('/') ? stopKey : `${stopKey}/`
+  while (current && !samePath(current, stop, windows)) {
+    if (!pathKey(current, windows).startsWith(prefix)) return []
     dirs.push(current)
-    seen.add(key)
-    if (!stop) break
-    current = parentDir(current)
+    current = parentDir(current, windows)
   }
   return dirs
 }
@@ -351,7 +381,7 @@ function resolveStageProgress(status: TaskStatus, current?: number, total?: numb
   return Math.round(clamp(current / total, 0, 1) * 100)
 }
 
-function normalizeTask(task: Partial<SeparationTask>): SeparationTask {
+function normalizeTask(task: Partial<SeparationTask>, windows = /^[A-Za-z]:|^\\\\/.test(task.output || task.jobOutput || '')): SeparationTask {
   let status = normalizeStatus(task.status)
   let interrupted = false
   if (isInterruptedTaskStatus(status)) {
@@ -361,10 +391,10 @@ function normalizeTask(task: Partial<SeparationTask>): SeparationTask {
   const normalizedRunConfig = normalizeRunConfig(task.runConfig)
   const normalizedOutput = normalizeOutputPath(task.output)
   const normalizedFiles = task.files || []
-  const workerOutputs = normalizeStemOutputs(task.outputs, task.input)
+  const workerOutputs = normalizeStemOutputs(task.outputs, task.input, windows)
   const normalizedOutputs = workerOutputs.length
     ? workerOutputs
-    : outputsFromFiles(normalizedOutput, normalizedFiles, normalizedRunConfig?.outputFormat || 'wav', task.outputPrefix, task.input)
+    : outputsFromFiles(normalizedOutput, normalizedFiles, normalizedRunConfig?.outputFormat || 'wav', task.outputPrefix, task.input, windows)
   const meta = STAGE_META[status]
   const startedAt = normalizeTimestamp(task.startedAt)
   const finishedAt = normalizeTimestamp(task.finishedAt)
@@ -576,7 +606,7 @@ export const useTaskStore = defineStore('task', () => {
   const ensembleWeights = ref<Record<string, number>>({})
   // Retain directory overrides across route changes, but inherit Settings after restarting.
   const separateTemporaryOutputDir = ref('')
-  const separateOutputDir = computed(() => resolveOutputDirectory(separateTemporaryOutputDir.value, useSettingsStore().outputDir))
+  const separateOutputDir = computed(() => resolveOutputDirectory(separateTemporaryOutputDir.value, useSettingsStore().outputDir, windowsPaths.value))
   const windowsPaths = computed(() => {
     const app = useAppStore()
     const platform = app.envInfo?.platform || app.runtimeInfo?.platform
@@ -790,7 +820,7 @@ export const useTaskStore = defineStore('task', () => {
       loadAppStore<PersistedSeparateState>('separate-state'),
     ])
     // Older versions retained result-page deletions as hidden task records.
-    tasks.value = (stored?.tasks || []).filter(task => !task.resultHidden).map((task) => normalizeTask(task))
+    tasks.value = (stored?.tasks || []).filter(task => !task.resultHidden).map((task) => normalizeTask(task, windowsPaths.value))
     activeTaskId.value = tasks.value[0]?.id || null
     separateRunMode.value = 'model'
     ensembleEnabled.value = separateStored?.ensembleEnabled === true
@@ -1109,7 +1139,7 @@ export const useTaskStore = defineStore('task', () => {
     const settings = useSettingsStore()
     const id = createRunId('sep')
     const resultId = createRunId('result')
-    const resolvedJobOutput = jobOutput || resolveOutputDirectory(settings.outputDir)
+    const resolvedJobOutput = jobOutput || resolveOutputDirectory(settings.outputDir, undefined, windowsPaths.value)
     const task: SeparationTask = {
       id,
       jobId,
@@ -1141,7 +1171,7 @@ export const useTaskStore = defineStore('task', () => {
     const settings = useSettingsStore()
     const id = createRunId('wf')
     const resultId = createRunId('result')
-    const resolvedJobOutput = jobOutput || resolveOutputDirectory(settings.outputDir)
+    const resolvedJobOutput = jobOutput || resolveOutputDirectory(settings.outputDir, undefined, windowsPaths.value)
     const task: SeparationTask = {
       id,
       jobId,
@@ -1522,7 +1552,7 @@ export const useTaskStore = defineStore('task', () => {
     } else if (event.type === 'error') {
       if (isTerminalTaskStatus(task.status)) return
       if (task.runConfig?.workbench && Array.isArray(event.payload?.outputs)) {
-        task.outputs = normalizeStemOutputs(event.payload.outputs, task.input)
+        task.outputs = normalizeStemOutputs(event.payload.outputs, task.input, windowsPaths.value)
         task.files = task.outputs.map(output => output.path)
       }
       if (typeof event.payload?.nodeId === 'string' && task.nodeStates?.[event.payload.nodeId]) {
@@ -1576,10 +1606,10 @@ export const useTaskStore = defineStore('task', () => {
       } else if (task.runConfig?.outputLayout === 'flat' && event.payload?.outputDir) {
         task.jobOutput = event.payload.outputDir
       }
-      const normalizedOutputs = normalizeStemOutputs(event.payload?.outputs, task.input)
+      const normalizedOutputs = normalizeStemOutputs(event.payload?.outputs, task.input, windowsPaths.value)
       task.outputs = normalizedOutputs.length
         ? normalizedOutputs
-        : outputsFromFiles(task.output, task.files, event.payload?.outputFormat || 'wav', task.outputPrefix, task.input)
+        : outputsFromFiles(task.output, task.files, event.payload?.outputFormat || 'wav', task.outputPrefix, task.input, windowsPaths.value)
       task.error = undefined
       touch(task)
       markTaskFinished(task, task.updatedAt)
@@ -1677,7 +1707,7 @@ export const useTaskStore = defineStore('task', () => {
   function resultTrashTargets(task: SeparationTask): string[] {
     const seen = new Set<string>()
     return task.outputs
-      .map((output) => output.path?.trim())
+      .map((output) => output.path)
       .filter((path): path is string => Boolean(path))
       .filter((path) => {
         if (seen.has(path)) return false
@@ -1686,21 +1716,67 @@ export const useTaskStore = defineStore('task', () => {
       })
   }
 
+  function resultTrashTargetsForTasks(items: SeparationTask[]): { paths: string[]; retained: number } {
+    const removing = getRemovalTasks(items.map(item => item.id))
+    const removingIds = new Set(removing.map(item => item.id))
+    const windows = windowsPaths.value
+    const protectedPaths = new Set<string>()
+    const protectedDirectories = new Set<string>()
+    for (const item of tasks.value) {
+      if (item.input) protectedPaths.add(pathKey(item.input, windows))
+      for (const input of Object.values(item.runConfig?.workbench?.inputs || {})) {
+        if (input) protectedPaths.add(pathKey(input, windows))
+      }
+      const definition = item.runConfig?.workflowDefinition || item.runConfig?.workbench?.sourceDefinition
+      if (definition) {
+        for (const node of workflowInputNodes(definition)) {
+          if (node.embeddedPath) protectedPaths.add(pathKey(node.embeddedPath, windows))
+        }
+        if (!removingIds.has(item.id)) {
+          for (const node of Array.isArray(definition.nodes) ? definition.nodes : []) {
+            if (node?.type === 'pymss_load_audio_batch' && typeof node.widgets_values?.[0] === 'string') {
+              const directory = pathKey(node.widgets_values[0], windows)
+              if (directory) protectedDirectories.add(directory.endsWith('/') ? directory : `${directory}/`)
+            }
+          }
+        }
+      }
+      if (!removingIds.has(item.id)) {
+        for (const output of item.outputs) protectedPaths.add(pathKey(output.path, windows))
+      }
+    }
+    const seen = new Set<string>()
+    let retained = 0
+    const directories = [...protectedDirectories]
+    const paths = removing.flatMap(resultTrashTargets).filter(path => {
+      const key = pathKey(path, windows)
+      if (seen.has(key)) return false
+      seen.add(key)
+      if (protectedPaths.has(key) || directories.some(directory => key.startsWith(directory))) {
+        retained += 1
+        return false
+      }
+      return true
+    })
+    return { paths, retained }
+  }
+
   function resultTrashEmptyDirs(task: SeparationTask): string[] {
     // Node-bound directories can have unrelated roots; only recycle explicit output files.
     if (task.runConfig?.workbench) return []
     if (task.runConfig?.outputLayout !== 'folders') return []
-    const jobOutput = task.jobOutput?.trim()
-    const output = task.output?.trim()
-    if (output && !samePath(output, jobOutput)) return cleanupDirChain(output, jobOutput)
+    const jobOutput = task.jobOutput
+    const output = task.output
+    const windows = windowsPaths.value
+    if (output && !samePath(output, jobOutput, windows)) return cleanupDirChain(output, jobOutput, windows)
 
     const parents = task.outputs
-      .map((item) => parentDir(item.path || ''))
+      .map((item) => parentDir(item.path || '', windows))
       .filter(Boolean)
-    const dirs = parents.flatMap(parent => cleanupDirChain(parent, jobOutput))
+    const dirs = parents.flatMap(parent => cleanupDirChain(parent, jobOutput, windows))
     const seen = new Set<string>()
     return dirs.filter((dir) => {
-      const key = dir.toLowerCase()
+      const key = pathKey(dir, windows)
       if (seen.has(key)) return false
       seen.add(key)
       return true
@@ -2073,7 +2149,7 @@ export const useTaskStore = defineStore('task', () => {
     const targets = [...inputFiles.value]
     const jobId = createRunId('job')
     const outputLayout = normalizeOutputLayout(options.outputLayout)
-    const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value)
+    const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value, windowsPaths.value)
     const outputNaming = normalizeOutputNaming(options.outputNaming)
     const createdTasks = targets.map((input, batchIndex) => submitOne(
       input,
@@ -2112,7 +2188,7 @@ export const useTaskStore = defineStore('task', () => {
     }
     const jobId = createRunId('job')
     const outputLayout = normalizeOutputLayout(options.outputLayout)
-    const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value)
+    const jobOutput = resolveOutputDirectory(options.outputDir, separateOutputDir.value, windowsPaths.value)
     const outputNaming = normalizeOutputNaming(options.outputNaming)
     const createdTasks = targets.map((input, batchIndex) => createQueuedWorkflowTask(
       input,
@@ -2131,8 +2207,8 @@ export const useTaskStore = defineStore('task', () => {
     const validationError = workflowDefinitionValidationError(workflow.definition)
     if (validationError) throw new Error(validationError)
     const nativeGraph = detectWorkflowFormat(workflow.definition) === 'graph'
-    const directory = resolveOutputDirectory(bindings.outputDirectory, useSettingsStore().outputDir)
-    const prepared = prepareWorkbenchRun(workflow.definition, bindings, directory)
+    const directory = resolveOutputDirectory(bindings.outputDirectory, useSettingsStore().outputDir, windowsPaths.value)
+    const prepared = prepareWorkbenchRun(workflow.definition, bindings, directory, windowsPaths.value)
     const jobId = createRunId('job')
     const runtimeEntry = { ...workflow, definition: prepared.definition }
     const createdTasks = prepared.runs.map((run, batchIndex) => {
@@ -2279,6 +2355,7 @@ export const useTaskStore = defineStore('task', () => {
     trashResultPaths,
     resultTrashEmptyDirs,
     resultTrashTargets,
+    resultTrashTargetsForTasks,
     primaryRevealPath,
     getTaskById,
     getJobById,

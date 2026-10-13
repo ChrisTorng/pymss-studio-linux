@@ -237,9 +237,8 @@ type BackendCardBase = { backend: RuntimeBackend; label: string; description: st
 
 const runtimeBackendCatalog = computed<BackendCardBase[]>(() => {
   const { isMac, isAppleSilicon } = runtimePlatform.value
-  const backends: RuntimeBackend[] = ['cpu']
+  const backends: RuntimeBackend[] = isAppleSilicon ? ['mlx'] : ['cpu']
   if (!isMac) backends.push('cuda', 'rocm')
-  if (isAppleSilicon) backends.push('mlx')
   return backends.map((backend) => ({
     backend,
     label: runtimeBackendName(backend),
@@ -358,7 +357,7 @@ function confirmRuntimeAction(title: string, content: string, positiveText: stri
 }
 
 async function installBackend(backend: RuntimeBackend) {
-  if (runtimeBusy.value) return
+  if (!app.runtimeManagementSupported || runtimeBusy.value) return
   const target = runtimeBackendLabel(backend)
   const sizeHint = t('settings.runtimeInstallSizeHint', { size: runtimeSizeHint(backend) })
   const reinstall = installedRuntimes.value.some((entry) => entry.backend === backend)
@@ -419,6 +418,7 @@ async function refreshRuntimeStatus(showSuccess = false) {
 }
 
 async function refreshRuntimeCoreVersions(fresh = false) {
+  if (!app.runtimeManagementSupported) return
   try {
     await (fresh ? app.loadRuntimeCoreVersions() : app.ensureRuntimeCoreVersions())
   } catch {
@@ -464,7 +464,7 @@ async function cancelRuntimeInstall() {
 }
 
 async function deleteRuntime(card: { backend: RuntimeBackend; env?: InstalledRuntime }) {
-  if (runtimeBusy.value) return
+  if (!app.runtimeManagementSupported || runtimeBusy.value) return
   const backend = card.backend
   const active = runtimeEnvironmentForBackend(app.runtimeInfo, backend)
   if (card.env && active === card.env && runtimeCurrentBackend.value === backend) {
@@ -497,6 +497,7 @@ async function deleteRuntime(card: { backend: RuntimeBackend; env?: InstalledRun
 }
 
 async function activateInstalledRuntime(card: { backend: RuntimeBackend; env?: InstalledRuntime }) {
+  if (!app.runtimeManagementSupported) return
   const backend = card.backend
   const active = runtimeEnvironmentForBackend(app.runtimeInfo, backend)
   if (runtimeBusy.value || (runtimeCurrentBackend.value === backend && active === card.env)) return
@@ -530,7 +531,7 @@ async function detectRuntime() {
 }
 
 async function updateRuntimeCore(card: { backend: RuntimeBackend; env?: InstalledRuntime }) {
-  if (runtimeBusy.value) return
+  if (!app.runtimeManagementSupported || runtimeBusy.value) return
   const runtime = card.env || installedRuntimes.value.find((entry) => entry.backend === card.backend) || null
   const versionUpdateAvailable = runtimeCoreUpdateAvailable(
     runtime || undefined,
@@ -561,7 +562,8 @@ async function updateRuntimeCore(card: { backend: RuntimeBackend; env?: Installe
 
 async function repairRuntimeDependencies(card: RuntimeBackendCard) {
   if (
-    runtimeBusy.value
+    !app.runtimeManagementSupported
+    || runtimeBusy.value
     || !runtimeCoreVersionCheckReady.value
     || card.coreUpdateAvailable
     || card.manifestNewer
@@ -1520,6 +1522,15 @@ onMounted(async () => {
 
           <!-- Runtime Environments -->
           <article class="about-info-card runtime-envs-card">
+            <div v-if="!app.runtimeManagementSupported" class="runtime-envs-card__platform-mask" role="status">
+              <strong>{{ t('settings.runtimeManagementWindowsOnly') }}</strong>
+              <p>{{ t('settings.runtimeManagementReadOnlyHint') }}</p>
+            </div>
+            <div
+              class="runtime-envs-card__content"
+              :inert="!app.runtimeManagementSupported"
+              :aria-hidden="!app.runtimeManagementSupported || undefined"
+            >
             <div class="section-title section-title--plain">
               <span class="section-title__icon">
                 <n-icon :component="HardwareChipOutline" size="18" />
@@ -1798,6 +1809,7 @@ onMounted(async () => {
                 <template #icon><n-icon :component="DocumentTextOutline" /></template>
                 {{ t('settings.runtimeShowInstallLog') }}
               </n-button>
+            </div>
             </div>
           </article>
         </section>
@@ -2966,9 +2978,35 @@ onMounted(async () => {
 }
 
 .runtime-envs-card {
+  position: relative;
+}
+
+.runtime-envs-card__content {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.runtime-envs-card__platform-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--surface-1) 90%, transparent);
+  backdrop-filter: blur(4px);
+  text-align: center;
+}
+
+.runtime-envs-card__platform-mask p {
+  max-width: 440px;
+  margin: 0;
+  color: var(--on-surface-muted);
 }
 
 .runtime-envs-list {

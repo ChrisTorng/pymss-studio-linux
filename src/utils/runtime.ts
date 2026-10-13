@@ -1,5 +1,11 @@
 import type { EnvInfo, InstalledRuntime, RuntimeBackend, RuntimeInfo } from '@/stores/app'
 
+export function supportsRuntimeManagement(info: Pick<RuntimeInfo, 'platform'> | null | undefined): boolean {
+  const reported = String(info?.platform || '').toLowerCase()
+  if (reported) return reported === 'win32' || reported === 'windows'
+  return typeof navigator !== 'undefined' && /^win/i.test(navigator.platform)
+}
+
 export function runtimeLoadError(info: RuntimeInfo | null | undefined, env: EnvInfo | null | undefined): string {
   if (info?.liveProbeError?.message) return info.liveProbeError.message
   const raw = String(info?.torchBackend || env?.torchError || '')

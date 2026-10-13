@@ -247,6 +247,21 @@ fn bootstrap_python_path(app: &AppHandle) -> AppResult<String> {
     }
 }
 
+fn runtime_python_command_path(python: &Path) -> Option<PathBuf> {
+    if !python.is_file() {
+        return None;
+    }
+    // Resolve directory aliases while keeping a POSIX venv's executable symlink.
+    // Resolving the executable itself launches the base interpreter and loses pyvenv.cfg.
+    Some(
+        python
+            .parent()?
+            .canonicalize()
+            .ok()?
+            .join(python.file_name()?),
+    )
+}
+
 fn resolve_active_runtime_record(file: &PathBuf) -> Option<(String, Option<String>)> {
     if !file.is_file() {
         return None;
@@ -254,21 +269,12 @@ fn resolve_active_runtime_record(file: &PathBuf) -> Option<(String, Option<Strin
     let content = std::fs::read_to_string(file).ok()?;
     let record: ActiveRuntimeRecord = serde_json::from_str(&content).ok()?;
     let python = PathBuf::from(&record.python_path);
-    // Absolute path – check directly
-    if python.is_absolute() {
-        return python
-            .canonicalize()
-            .ok()
-            .filter(|path| path.is_file())
-            .map(|path| (path.to_string_lossy().to_string(), record.source));
-    }
-    // Relative path – resolve against the directory containing the file
-    let parent = file.parent()?;
-    let resolved = parent.join(&python);
-    resolved
-        .canonicalize()
-        .ok()
-        .filter(|path| path.is_file())
+    let python = if python.is_absolute() {
+        python
+    } else {
+        file.parent()?.join(python)
+    };
+    runtime_python_command_path(&python)
         .map(|path| (path.to_string_lossy().to_string(), record.source))
 }
 
@@ -318,8 +324,8 @@ fn resolve_runtime_overlay_for_record(
     let content = std::fs::read_to_string(file).ok()?;
     let record: ActiveRuntimeRecord = serde_json::from_str(&content).ok()?;
     let (record_python, _) = resolve_active_runtime_record(&file.to_path_buf())?;
-    let expected = PathBuf::from(active_python).canonicalize().ok()?;
-    let recorded = PathBuf::from(record_python).canonicalize().ok()?;
+    let expected = runtime_python_command_path(Path::new(active_python))?;
+    let recorded = runtime_python_command_path(Path::new(&record_python))?;
     if expected != recorded {
         return None;
     }
@@ -371,14 +377,16 @@ fn is_bundled_runtime_python_path(file: &Path, python_path: &str) -> AppResult<b
     let runtime_root = envs_dir
         .parent()
         .ok_or_else(|| AppError::Worker("bundled runtime root is missing".into()))?;
-    let python = PathBuf::from(python_path).canonicalize()?;
+    let Some(python) = runtime_python_command_path(Path::new(python_path)) else {
+        return Ok(false);
+    };
     let bootstrap_matches = [
         runtime_root.join("python.exe"),
         runtime_root.join("bin").join("python3"),
         runtime_root.join("bin").join("python"),
     ]
     .into_iter()
-    .filter_map(|candidate| candidate.canonicalize().ok())
+    .filter_map(|candidate| runtime_python_command_path(&candidate))
     .any(|candidate| candidate == python);
     if bootstrap_matches {
         return Ok(backend == "mlx");
@@ -1698,6 +1706,82 @@ mod tests {
             assert_eq!(super::resolve_active_runtime_record(&pointer), None);
             assert_eq!(fs::read(&pointer).unwrap(), bytes);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_pointer_keeps_the_posix_venv_executable_link() {
+        let fixture = ResourceFixture::new("venv-pointer");
+        let bootstrap = fixture.0.join("bundle/python-runtime/bin/python3");
+        fixture.file(&bootstrap);
+        let runtime_root = fixture.0.join("user/runtime-envs");
+        let python = runtime_root.join("cpu/bin/python");
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("../../../../bundle/python-runtime/bin/python3", &python)
+            .unwrap();
+        let pointer = runtime_root.join("active-runtime.json");
+        let expected = python.parent().unwrap().canonicalize().unwrap().join("python");
+        for path in [
+            "cpu/bin/python".to_string(),
+            python.to_string_lossy().to_string(),
+        ] {
+            fs::write(
+                &pointer,
+                serde_json::to_vec(&json!({"backend": "cpu", "pythonPath": path})).unwrap(),
+            )
+            .unwrap();
+            let (resolved, _) = super::resolve_active_runtime_record(&pointer).unwrap();
+            assert_eq!(Path::new(&resolved), expected);
+            assert_ne!(Path::new(&resolved), python.canonicalize().unwrap());
+            assert!(super::active_path_backend_matches(&pointer, &resolved));
+            assert_eq!(
+                super::select_worker_python("infer", &bootstrap.to_string_lossy(), Some(resolved.clone()))
+                    .unwrap(),
+                resolved,
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn venv_links_sharing_an_executable_do_not_share_runtime_overlays() {
+        let fixture = ResourceFixture::new("venv-overlay");
+        let bootstrap = fixture.0.join("python-runtime/bin/python3");
+        fixture.file(&bootstrap);
+        let runtime_root = fixture.0.join("python-runtime/runtime-envs");
+        let cpu_python = runtime_root.join("cpu/bin/python");
+        let mlx_python = runtime_root.join("mlx/bin/python");
+        for python in [&cpu_python, &mlx_python] {
+            fs::create_dir_all(python.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink("../../../bin/python3", python).unwrap();
+        }
+        let overlay = runtime_root.join(".overlays/cpu/generation/site-packages");
+        fs::create_dir_all(&overlay).unwrap();
+        let pointer = runtime_root.join("active-runtime.json");
+        fs::write(
+            &pointer,
+            serde_json::to_vec(&json!({"backend": "cpu", "pythonPath": "cpu/bin/python", "overlayPath": overlay})).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            super::is_bundled_runtime_python_path(&pointer, &cpu_python.to_string_lossy()).unwrap()
+        );
+        assert_eq!(
+            super::resolve_runtime_overlay_for_record(
+                &pointer,
+                &cpu_python.to_string_lossy(),
+                std::slice::from_ref(&runtime_root),
+            ),
+            Some(overlay.canonicalize().unwrap()),
+        );
+        assert_eq!(
+            super::resolve_runtime_overlay_for_record(
+                &pointer,
+                &mlx_python.to_string_lossy(),
+                &[runtime_root],
+            ),
+            None,
+        );
     }
 
     #[test]

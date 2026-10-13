@@ -84,7 +84,7 @@ async function bootstrap() {
     // If the active pointer was lost (for example after an overwrite that preserved the
     // user data directory), activate the only usable environment before the first env check.
     // Multiple environments remain explicit-choice only.
-    const candidate = runtimeToActivate(runtime)
+    const candidate = appState.runtimeManagementSupported ? runtimeToActivate(runtime) : undefined
     if (candidate?.backend && candidate.pythonPath) {
       try {
         await appState.activateRuntime(candidate.backend as RuntimeBackend, {
@@ -99,12 +99,12 @@ async function bootstrap() {
       }
     }
     const activeRuntime = activeRuntimeEnvironment(runtime)
-    if (runtime.ready && !runtimeCoreSyncAvailable(activeRuntime, runtime.manifestVersion)) {
+    if (runtime.ready && (!appState.runtimeManagementSupported || !runtimeCoreSyncAvailable(activeRuntime, runtime.manifestVersion))) {
       void models.loadModels().catch((error) => {
         console.warn('Failed to preload model metadata', error)
       })
     }
-    if (runtime.installedEnvironments?.some((env) => env.coreUpdateSupported !== false)) {
+    if (appState.runtimeManagementSupported && runtime.installedEnvironments?.some((env) => env.coreUpdateSupported !== false)) {
       void appState.loadRuntimeCoreVersions().catch((error) => {
         console.warn('Failed to check runtime core versions', error)
       })

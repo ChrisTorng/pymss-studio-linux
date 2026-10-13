@@ -836,7 +836,30 @@ const modelCompactLine = computed(() => {
 const currentTaskFileName = computed(() => currentTask.value ? getFileName(currentTask.value.input) : '')
 const currentTaskOutputPath = computed(() => currentJob.value?.output || currentTask.value?.output || normalizedOutputDir.value)
 const currentTaskOutputSummary = computed(() => shortenMiddle(currentTaskOutputPath.value, 72))
-const currentTaskDuration = computed(() => currentTask.value ? taskDuration(currentTask.value) : '')
+const taskClockNow = ref(Date.now())
+let taskClockTimer: ReturnType<typeof setInterval> | null = null
+const currentTaskDuration = computed(() => currentTask.value ? taskDuration(currentTask.value, taskClockNow.value) : '')
+
+function stopTaskClock() {
+  if (taskClockTimer === null) return
+  clearInterval(taskClockTimer)
+  taskClockTimer = null
+}
+
+function syncTaskClock(running: boolean) {
+  taskClockNow.value = Date.now()
+  if (!running) {
+    stopTaskClock()
+  } else if (taskClockTimer === null) {
+    taskClockTimer = setInterval(() => { taskClockNow.value = Date.now() }, 1000)
+  }
+}
+
+watch(
+  () => Boolean(currentTask.value && !['queued', 'done', 'failed', 'cancelled'].includes(currentTask.value.status)),
+  syncTaskClock,
+  { immediate: true },
+)
 
 function configuredStemOrder(item: SeparationTask) {
   if (item.runConfig?.outputNaming?.stemOrder?.length) return item.runConfig.outputNaming.stemOrder
@@ -1398,8 +1421,14 @@ function taskSubMessage(item: SeparationTask) {
   return normalizeProgressMessage(item.progressDetail || item.message)
 }
 
-function taskDuration(item: SeparationTask) {
-  const seconds = Math.max(0, Math.round((item.updatedAt - item.createdAt) / 1000))
+function taskDuration(item: SeparationTask, now: number) {
+  const terminal = ['done', 'failed', 'cancelled'].includes(item.status)
+  const startedAt = item.startedAt ?? item.createdAt
+  const durationMs = terminal
+    ? (typeof item.durationMs === 'number' && Number.isFinite(item.durationMs) && item.durationMs >= 0
+        ? item.durationMs : (item.finishedAt ?? item.updatedAt) - startedAt)
+    : item.status === 'queued' ? 0 : now - startedAt
+  const seconds = Math.max(0, Math.round(durationMs / 1000))
   if (seconds < 60) return `${seconds}s`
   const minutes = Math.floor(seconds / 60)
   const rest = seconds % 60
@@ -1604,6 +1633,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  stopTaskClock()
   if (unlistenDragDrop) unlistenDragDrop()
   finishInputPointerDrag()
   finishStemPointerDrag()

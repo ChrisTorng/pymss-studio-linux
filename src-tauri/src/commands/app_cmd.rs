@@ -573,12 +573,21 @@ pub async fn manage_optional_runtime_package(
     Ok(serde_json::json!({ "taskId": task_id, "started": true }))
 }
 
+fn require_windows_runtime_management() -> AppResult<()> {
+    if cfg!(windows) {
+        Ok(())
+    } else {
+        Err(AppError::Worker("runtime management is only available on Windows".into()))
+    }
+}
+
 #[tauri::command]
 pub async fn start_runtime_install(
     app: AppHandle,
     state: State<'_, AppState>,
     payload: Value,
 ) -> AppResult<Value> {
+    require_windows_runtime_management()?;
     if let Ok(tasks) = state.tasks.lock() {
         if tasks.keys().any(|id| id.starts_with("runtime_install_")) {
             return Err(AppError::Worker("runtime installation is already running".into()));
@@ -623,11 +632,13 @@ pub async fn cancel_runtime_core_update(
 
 #[tauri::command]
 pub async fn activate_runtime(app: AppHandle, payload: Value) -> AppResult<Value> {
+    require_windows_runtime_management()?;
     run_worker_with_payload(&app, "activate_runtime", Some(payload))
 }
 
 #[tauri::command]
 pub async fn delete_runtime(app: AppHandle, payload: Value) -> AppResult<Value> {
+    require_windows_runtime_management()?;
     run_worker_with_payload(&app, "delete_runtime", Some(payload))
 }
 
@@ -757,6 +768,7 @@ pub async fn debug_runtime_pointers(app: AppHandle) -> AppResult<DebugRuntimePoi
 
 #[tauri::command]
 pub async fn debug_runtime_write_file(app: AppHandle, payload: DebugRuntimeWriteRequest) -> AppResult<DebugRuntimePointersPayload> {
+    require_windows_runtime_management()?;
     require_runtime_debug_developer_mode(&app)?;
     if payload.content.len() > DEBUG_RUNTIME_MAX_FILE_BYTES {
         return Err(AppError::Worker("runtime debug file is too large".into()));
@@ -774,6 +786,7 @@ pub async fn debug_runtime_write_file(app: AppHandle, payload: DebugRuntimeWrite
 
 #[tauri::command]
 pub async fn debug_runtime_restore_file(app: AppHandle, payload: DebugRuntimeRestoreRequest) -> AppResult<DebugRuntimePointersPayload> {
+    require_windows_runtime_management()?;
     require_runtime_debug_developer_mode(&app)?;
     let (path, _kind, _source) = resolve_debug_runtime_path(&app, &payload.path)?;
     let backup_path = debug_runtime_backup_path(&path)?;
@@ -825,6 +838,7 @@ fn validate_debug_runtime_override(backend: &str, python_path: &str) -> AppResul
 
 #[tauri::command]
 pub async fn debug_runtime_override_active(app: AppHandle, payload: DebugActiveRuntimeOverrideRequest) -> AppResult<DebugRuntimePointersPayload> {
+    require_windows_runtime_management()?;
     require_runtime_debug_developer_mode(&app)?;
     let (backend, python_path) = validate_debug_runtime_override(&payload.backend, &payload.python_path)?;
     let path = storage::active_runtime_file(&app)?;
@@ -1108,12 +1122,43 @@ pub struct OrphanedEditorProject {
     name: String,
 }
 
-fn remove_editor_project_dirs(root: &Path, project_ids: &[String]) -> EditorProjectCleanupResult {
+fn remove_editor_project_dirs(root: &Path, project_ids: &[String], task_ids: &[String]) -> EditorProjectCleanupResult {
     let mut result = EditorProjectCleanupResult::default();
+    let task_ids: std::collections::HashSet<&str> = task_ids.iter().map(|task_id| task_id.trim()).filter(|task_id| !task_id.is_empty()).collect();
     for project_id in project_ids {
-        let project_dir = root.join(safe_file_name(project_id));
-        if !project_dir.exists() {
-            result.missing_project_ids.push(project_id.clone());
+        if validate_editor_project_id(project_id).is_err() {
+            result.failed_project_ids.push(project_id.clone());
+            continue;
+        }
+        let project_dir = root.join(project_id);
+        let metadata = match std::fs::symlink_metadata(&project_dir) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                result.missing_project_ids.push(project_id.clone());
+                continue;
+            }
+            Err(_) => {
+                result.failed_project_ids.push(project_id.clone());
+                continue;
+            }
+        };
+        if !metadata.is_dir() || is_link_metadata(&metadata) {
+            result.failed_project_ids.push(project_id.clone());
+            continue;
+        }
+        let project_path = project_dir.join("project.json");
+        let project = std::fs::symlink_metadata(&project_path)
+            .ok()
+            .filter(|metadata| metadata.is_file() && !is_link_metadata(metadata))
+            .and_then(|_| std::fs::read_to_string(&project_path).ok())
+            .and_then(|content| serde_json::from_str::<Value>(&content).ok());
+        let owned = project.as_ref().is_some_and(|project| {
+            project.get("id").and_then(Value::as_str) == Some(project_id.as_str())
+                && project.get("sourceTaskId").and_then(Value::as_str)
+                    .is_some_and(|task_id| !task_id.is_empty() && task_ids.contains(task_id))
+        });
+        if !owned {
+            result.failed_project_ids.push(project_id.clone());
             continue;
         }
         match std::fs::remove_dir_all(project_dir) {
@@ -1820,7 +1865,7 @@ pub async fn delete_editor_projects_for_tasks(
     }
 
     let root = editor_projects_root(&app)?;
-    Ok(remove_editor_project_dirs(&root, &project_ids))
+    Ok(remove_editor_project_dirs(&root, &project_ids, &task_ids))
 }
 
 #[tauri::command]
@@ -1847,10 +1892,9 @@ pub async fn delete_orphaned_editor_projects(
     active_task_ids: Vec<String>,
 ) -> AppResult<EditorProjectCleanupResult> {
     let root = editor_projects_root(&app)?;
-    let project_ids: Vec<String> = orphaned_editor_projects(&root, &active_task_ids)?
-        .into_iter()
-        .map(|project| project.project_id)
-        .collect();
+    let projects = orphaned_editor_projects(&root, &active_task_ids)?;
+    let project_ids: Vec<String> = projects.iter().map(|project| project.project_id.clone()).collect();
+    let task_ids: Vec<String> = projects.iter().map(|project| project.source_task_id.clone()).collect();
     let blocked_project_ids = open_editor_project_ids(&app, &project_ids);
     if !blocked_project_ids.is_empty() {
         return Ok(EditorProjectCleanupResult {
@@ -1858,7 +1902,7 @@ pub async fn delete_orphaned_editor_projects(
             ..EditorProjectCleanupResult::default()
         });
     }
-    Ok(remove_editor_project_dirs(&root, &project_ids))
+    Ok(remove_editor_project_dirs(&root, &project_ids, &task_ids))
 }
 
 #[tauri::command]
@@ -2336,7 +2380,11 @@ fn path_to_string(path: &Path) -> String {
 }
 
 fn normalize_path_key(value: &str) -> String {
-    value.replace('\\', "/").to_ascii_lowercase()
+    if cfg!(windows) {
+        value.replace('\\', "/").to_ascii_lowercase()
+    } else {
+        value.to_string()
+    }
 }
 
 fn normalized_relative_path(path: &Path) -> Option<String> {
@@ -3080,6 +3128,7 @@ pub async fn start_runtime_core_update(
     state: State<'_, AppState>,
     payload: Value,
 ) -> AppResult<Value> {
+    require_windows_runtime_management()?;
     let task_id = payload
         .get("taskId")
         .and_then(Value::as_str)
@@ -3099,7 +3148,17 @@ fn is_ignored_empty_dir_file(path: &Path) -> bool {
         .is_some_and(|name| name == ".DS_Store")
 }
 
+fn is_link_metadata(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
+}
+
 fn is_effectively_empty_dir(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.is_dir() || is_link_metadata(&metadata) {
+        return false;
+    }
     let entries = match std::fs::read_dir(path) {
         Ok(entries) => entries,
         Err(_) => return false,
@@ -3109,13 +3168,19 @@ fn is_effectively_empty_dir(path: &Path) -> bool {
             return false;
         };
         let child = entry.path();
-        if child.is_dir() {
+        let Ok(metadata) = std::fs::symlink_metadata(&child) else {
+            return false;
+        };
+        if is_link_metadata(&metadata) {
+            return false;
+        }
+        if metadata.is_dir() {
             if !is_effectively_empty_dir(&child) {
                 return false;
             }
             continue;
         }
-        if !child.is_file() || !is_ignored_empty_dir_file(&child) {
+        if !metadata.is_file() || !is_ignored_empty_dir_file(&child) {
             return false;
         }
     }
@@ -3127,7 +3192,7 @@ fn normalize_trash_empty_dirs(paths: Vec<String>) -> Vec<String> {
     let mut dirs: Vec<String> = paths
         .into_iter()
         .filter(|path| !path.trim().is_empty())
-        .filter(|path| seen.insert(path.to_lowercase()))
+        .filter(|path| seen.insert(normalize_path_key(path)))
         .collect();
     dirs.sort_by_key(|path| {
         std::cmp::Reverse(Path::new(path).components().count())
@@ -3141,9 +3206,17 @@ pub async fn move_paths_to_trash(paths: Vec<String>, empty_dirs: Option<Vec<Stri
     let mut failed = Vec::new();
     for path in paths {
         let target = Path::new(&path);
+        if !target.is_absolute() {
+            failed.push(path);
+            continue;
+        }
         // 已不存在的路径视为已删除，无需报错
         if !target.exists() {
             trashed.push(path);
+            continue;
+        }
+        if !target.is_file() {
+            failed.push(path);
             continue;
         }
         match trash::delete(target) {
@@ -3157,7 +3230,7 @@ pub async fn move_paths_to_trash(paths: Vec<String>, empty_dirs: Option<Vec<Stri
             trashed.push(path);
             continue;
         }
-        if !target.is_dir() {
+        if !target.is_absolute() || target.parent().is_none() || !target.is_dir() {
             continue;
         }
         if !is_effectively_empty_dir(target) {
@@ -3348,10 +3421,15 @@ mod tests {
         let recordings = root.join(&existing_id).join("recordings");
         fs::create_dir_all(&recordings).expect("create editor project directory");
         fs::write(recordings.join("take.wav"), b"audio").expect("write editor recording");
+        fs::write(
+            root.join(&existing_id).join("project.json"),
+            r#"{"id":"edit_existing","sourceTaskId":"existing"}"#,
+        ).expect("write editor project ownership");
 
         let result = remove_editor_project_dirs(
             &root,
             &[existing_id.clone(), missing_id.clone()],
+            &["existing".to_string()],
         );
 
         assert_eq!(result.deleted_project_ids, vec![existing_id.clone()]);
@@ -3394,5 +3472,71 @@ mod tests {
         assert_eq!(projects[0].project_id, "edit_orphan");
         assert_eq!(projects[0].source_task_id, "task-orphan");
         fs::remove_dir_all(&root).expect("remove orphaned project test root");
+    }
+
+    #[test]
+    fn editor_project_cleanup_rejects_lossy_task_id_collisions_and_unknown_ownership() {
+        let root = temp_test_dir("editor-project-ownership");
+        let project_id = editor_project_id_for_task_id("a:b");
+        assert_eq!(project_id, editor_project_id_for_task_id("a/b"));
+        let project_dir = root.join(&project_id);
+        fs::create_dir_all(&project_dir).expect("create project directory");
+        let project_path = project_dir.join("project.json");
+        fs::write(&project_path, r#"{"id":"edit_a_b","sourceTaskId":"a:b"}"#).unwrap();
+        let result = remove_editor_project_dirs(&root, &[project_id.clone()], &["a/b".to_string()]);
+        assert_eq!(result.failed_project_ids, vec![project_id.clone()]);
+        assert!(project_dir.is_dir());
+        for content in [r#"{"id":"edit_a_b"}"#, r#"{"id":"other","sourceTaskId":"a:b"}"#, "invalid"] {
+            fs::write(&project_path, content).unwrap();
+            let result = remove_editor_project_dirs(&root, &[project_id.clone()], &["a:b".to_string()]);
+            assert_eq!(result.failed_project_ids, vec![project_id.clone()]);
+            assert!(project_dir.is_dir());
+        }
+        fs::write(&project_path, r#"{"id":"edit_a_b","sourceTaskId":"a:b"}"#).unwrap();
+        let result = remove_editor_project_dirs(&root, &[project_id.clone()], &[" a:b ".to_string()]);
+        assert_eq!(result.deleted_project_ids, vec![project_id]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn native_path_keys_preserve_posix_case_and_literal_backslashes() {
+        if cfg!(windows) {
+            assert_eq!(normalize_path_key("C:\\Audio\\Song.wav"), normalize_path_key("c:/audio/song.wav"));
+        } else {
+            assert_ne!(normalize_path_key("/audio/Foo.wav"), normalize_path_key("/audio/foo.wav"));
+            assert_ne!(normalize_path_key("/audio/a\\b.wav"), normalize_path_key("/audio/a/b.wav"));
+            assert_eq!(normalize_trash_empty_dirs(vec!["/audio/Foo".into(), "/audio/foo".into()]).len(), 2);
+        }
+    }
+
+    #[test]
+    fn empty_directory_checks_do_not_follow_links_or_directory_cycles() {
+        let root = temp_test_dir("empty-directory-links");
+        fs::create_dir_all(&root).unwrap();
+        assert!(is_effectively_empty_dir(&root));
+        fs::write(root.join(".DS_Store"), b"metadata").unwrap();
+        assert!(is_effectively_empty_dir(&root));
+        let link = root.join("loop");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&root, &link).unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let status = std::process::Command::new("cmd.exe")
+                .raw_arg(format!("/c mklink /J \"{}\" \"{}\"", link.display(), root.display()))
+                .output().expect("create directory junction");
+            assert!(status.status.success());
+        }
+        assert!(!is_effectively_empty_dir(&link));
+        assert!(!is_effectively_empty_dir(&root));
+        let result = remove_editor_project_dirs(&root, &["loop".to_string()], &["task".to_string()]);
+        assert_eq!(result.failed_project_ids, vec!["loop".to_string()]);
+        assert!(root.is_dir());
+        #[cfg(unix)]
+        fs::remove_file(&link).unwrap();
+        #[cfg(windows)]
+        fs::remove_dir(&link).unwrap();
+        assert!(is_effectively_empty_dir(&root));
+        fs::remove_dir_all(&root).unwrap();
     }
 }

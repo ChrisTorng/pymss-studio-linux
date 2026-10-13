@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { createWorkflowBindings, prepareWorkbenchRun, visibleWorkflowNodeId, workflowOutputNodes, workflowExecutionSignature, workflowBindingsEqual } from '../src/workflows/workbench.ts'
+import { createWorkflowBindings, prepareWorkbenchRun, visibleWorkflowNodeId, workflowOutputNodes, workbenchOutputDirectory, workflowExecutionSignature, workflowBindingsEqual } from '../src/workflows/workbench.ts'
 
 const graph = {
   nodes: [
@@ -36,6 +36,41 @@ test('simple workflows require input bindings and retain per-file batching', () 
   assert.deepEqual(prepared.runs.map(run => run.input), ['first.wav', 'second.wav'])
   assert.deepEqual(prepared.definition, definition)
   assert.deepEqual(prepared.runs.map(run => run.outputs), [{ 'save:split:Vocals': 'out' }, { 'save:split:Vocals': 'out' }])
+})
+
+test('POSIX workbench directories preserve literal backslashes and spaces', () => {
+  const definition = { version: 1, steps: [{ id: 'split', model: 'model', save: { Vocals: 'Default' } }] }
+  const bindings = createWorkflowBindings()
+  bindings.inputs.input = { files: ['/audio/mix\\take.wav', '/audio/ song .wav'] }
+  bindings.outputDirectory = '/tmp/results\\'
+  bindings.outputLayout = 'folders'
+  const prepared = prepareWorkbenchRun(definition, bindings, '/tmp/default', false)
+  assert.deepEqual(prepared.runs.map(run => run.outputs['save:split:Vocals']), [
+    '/tmp/results\\/mix\\take', '/tmp/results\\/ song ',
+  ])
+  assert.equal(workbenchOutputDirectory({ id: 'save', label: '', subdirectory: 'child' }, '/tmp/results\\', '/tmp/default'), '/tmp/results\\/child')
+})
+
+test('workbench directories retain Windows drive and UNC roots', () => {
+  const definition = { version: 1, steps: [{ id: 'split', model: 'model', save: { Vocals: 'Default' } }] }
+  const bindings = createWorkflowBindings()
+  bindings.inputs.input = { files: ['C:\\audio\\mix.wav'] }
+  bindings.outputLayout = 'folders'
+  for (const root of ['D:\\', '\\\\server\\share\\']) {
+    bindings.outputDirectory = root
+    const prepared = prepareWorkbenchRun(definition, bindings, 'D:\\default', true)
+    assert.equal(prepared.runs[0].outputs['save:split:Vocals'], `${root}mix`)
+  }
+})
+
+test('workbench input basenames cannot escape their output directory', () => {
+  const definition = { version: 1, steps: [{ id: 'split', model: 'model', save: { Vocals: 'Default' } }] }
+  const bindings = createWorkflowBindings()
+  bindings.inputs.input = { files: ['/audio/...wav', '/audio/../song.wav'] }
+  bindings.outputDirectory = '/tmp/results'
+  bindings.outputLayout = 'folders'
+  const prepared = prepareWorkbenchRun(definition, bindings, '/tmp/default', false)
+  assert.deepEqual(prepared.runs.map(run => run.outputs['save:split:Vocals']), ['/tmp/results/workflow', '/tmp/results/song'])
 })
 
 test('native graphs validate the selected output root without injecting it into the graph', () => {

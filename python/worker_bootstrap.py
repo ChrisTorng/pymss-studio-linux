@@ -139,7 +139,8 @@ def _resolve_runtime_state_from(file: Path) -> dict[str, Any] | None:
         if not p.is_absolute():
             resolved = file.parent / p
             if resolved.is_file():
-                state["pythonPath"] = str(resolved.resolve())
+                # Keep the executable link: POSIX venvs locate pyvenv.cfg through argv[0].
+                state["pythonPath"] = str(resolved.parent.resolve() / resolved.name)
             else:
                 return None
         elif not p.is_file():
@@ -1021,7 +1022,11 @@ def _bundled_bootstrap_python() -> Path | None:
 def _is_bundled_bootstrap_python(path: Path) -> bool:
     bundled = _bundled_bootstrap_python()
     try:
-        return bool(bundled and _same_path(path.resolve(), bundled.resolve()))
+        return bool(
+            bundled
+            and _same_path(path.parent.resolve(), bundled.parent.resolve())
+            and _same_path(path.resolve(), bundled.resolve())
+        )
     except OSError:
         return False
 
@@ -1739,6 +1744,7 @@ def _runtime_python_works(python_path: Path) -> bool:
             capture_output=True,
             text=True,
             timeout=20,
+            env=_probe_environment(),
         ).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
@@ -1753,6 +1759,7 @@ def _runtime_pip_works(python_path: Path) -> bool:
             encoding="utf-8",
             errors="replace",
             timeout=30,
+            env=_probe_environment(),
         ).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
@@ -1782,6 +1789,7 @@ def _ensure_runtime_pip(
         encoding="utf-8",
         errors="replace",
         timeout=120,
+        env=_probe_environment(),
     )
     for line in result.stdout.splitlines():
         message = line.rstrip()
@@ -1896,7 +1904,7 @@ def cmd_install_runtime(payload: dict[str, Any]) -> int:
         command.extend(args)
         append_log(stage, "pip install " + " ".join(args))
         _emit("runtime_install_stage", {"stage": stage, "command": "pip install " + " ".join(args)}, task_id)
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=os.environ.copy())
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=_probe_environment())
         assert process.stdout is not None
         try:
             for line in process.stdout:

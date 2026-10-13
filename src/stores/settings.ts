@@ -224,7 +224,7 @@ function compatibleRuntimeDeviceSelection(selected: string, env?: EnvInfo | null
   const kind = selected.split(':')[0]
   if (kind === 'cuda' || kind === 'rocm') return env.torchBackend === 'cuda' || env.torchBackend === 'rocm' ? selected : 'auto'
   if (kind === 'mps') return env.mpsAvailable ? selected : 'auto'
-  if (kind === 'mlx') return env.mlxAvailable || env.mpsAvailable ? selected : 'auto'
+  if (kind === 'mlx') return env.mlxAvailable ? selected : 'auto'
   return selected
 }
 
@@ -473,7 +473,7 @@ export const useSettingsStore = defineStore('settings', () => {
         options.push({ label: `${gpuName} ${id}`, value: `${gpuKind}:${id}`, type: gpuKind, deviceIds: [id] })
       }
     }
-    if (env?.mlxAvailable || env?.mpsAvailable) options.push({ label: 'Apple MLX', value: 'mlx', type: 'mlx', deviceIds: [0] })
+    if (env?.mlxAvailable) options.push({ label: 'Apple MLX', value: 'mlx', type: 'mlx', deviceIds: [0] })
     if (env?.mpsAvailable) options.push({ label: 'Apple MPS', value: 'mps', type: 'mps', deviceIds: [0] })
     return options
   }

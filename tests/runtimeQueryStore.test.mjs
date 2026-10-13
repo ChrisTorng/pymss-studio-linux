@@ -9,6 +9,10 @@ import { Window } from 'happy-dom'
 const browser = new Window()
 globalThis.window = browser
 globalThis.document = browser.document
+const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator')
+// Runtime mutation cases use Windows regardless of the machine running the tests.
+Object.defineProperty(browser.navigator, 'platform', { configurable: true, value: 'Win32' })
+Object.defineProperty(globalThis, 'navigator', { configurable: true, value: browser.navigator })
 
 const vite = await createServer({
   configFile: false,
@@ -33,7 +37,14 @@ const vite = await createServer({
     },
   }],
 })
-after(() => vite.close())
+after(async () => {
+  try {
+    await vite.close()
+  } finally {
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor)
+    else delete globalThis.navigator
+  }
+})
 
 const { useAppStore } = await vite.ssrLoadModule('/src/stores/app.ts')
 const { buildDiagnosticChecks } = await vite.ssrLoadModule('/src/utils/diagnostics.ts')
@@ -230,6 +241,71 @@ test('runtime changes reconcile incompatible device preferences and retain compa
   assert.equal(settings.defaultDevice, 'auto')
   settings.$dispose()
 })
+
+test('a macOS MPS runtime offers MLX only when the MLX package is available', () => {
+  setActivePinia(createPinia())
+  const settings = useSettingsStore()
+  const env = { torchAvailable: true, torchBackend: 'cpu', mpsAvailable: true, mlxAvailable: false }
+  assert.equal(settings.deviceOptions(env).some(option => option.value === 'mlx'), false)
+  assert.equal(settings.deviceOptions(env).some(option => option.value === 'mps'), true)
+  settings.defaultDevice = 'mlx'
+  assert.deepEqual(settings.getRuntimeDeviceConfig(env), { device: 'auto', deviceIds: [0] })
+  settings.reconcileRuntimeDevice(env)
+  assert.equal(settings.defaultDevice, 'auto')
+  const mlx = { ...env, mlxAvailable: true }
+  assert.equal(settings.deviceOptions(mlx).some(option => option.value === 'mlx'), true)
+  settings.defaultDevice = 'mlx'
+  assert.deepEqual(settings.getRuntimeDeviceConfig(mlx), { device: 'mlx', deviceIds: [0] })
+  settings.$dispose()
+})
+
+test('the macOS MLX runtime still supports selecting CPU as an inference device', () => {
+  setActivePinia(createPinia())
+  const settings = useSettingsStore()
+  const env = { torchAvailable: true, torchBackend: 'cpu', mpsAvailable: true, mlxAvailable: true }
+  const devices = settings.deviceOptions(env).map(option => option.value)
+  assert.ok(devices.includes('cpu'))
+  assert.ok(devices.includes('mlx'))
+  settings.defaultDevice = 'cpu'
+  settings.reconcileRuntimeDevice(env)
+  assert.equal(settings.defaultDevice, 'cpu')
+  assert.deepEqual(settings.getRuntimeDeviceConfig(env), { device: 'cpu', deviceIds: [0] })
+  settings.defaultDevice = 'mlx'
+  assert.deepEqual(settings.getRuntimeDeviceConfig(env), { device: 'mlx', deviceIds: [0] })
+  settings.$dispose()
+})
+
+for (const platform of ['darwin', 'linux']) {
+  test(`${platform} rejects runtime mutations before IPC and preserves read-only probes`, async () => {
+    const commands = []
+    const app = appStore(async command => {
+      commands.push(command)
+      if (command === 'runtime_info') return { platform, ready: true }
+      if (command === 'get_env_info') return { platform, pymssAvailable: true, torchAvailable: true }
+      if (command === 'runtime_env_sizes') return { sizes: { mlx: 42 }, incompleteBackends: [] }
+      throw new Error(`unexpected ${command}`)
+    })
+    await app.checkRuntimeInfo()
+    assert.equal(app.runtimeManagementSupported, false)
+    for (const mutate of [
+      () => app.installRuntime('cpu'),
+      () => app.activateRuntime('cpu'),
+      () => app.deleteRuntime('cpu'),
+      () => app.updateRuntimeCore('cpu'),
+      () => app.updateDebugRuntime('debug_runtime_write_file', { path: '/runtime/active-runtime.json', content: '{}' }),
+      () => app.updateDebugRuntime('debug_runtime_restore_file', { path: '/runtime/active-runtime.json' }),
+      () => app.updateDebugRuntime('debug_runtime_override_active', { backend: 'cpu', pythonPath: '/runtime/cpu/bin/python' }),
+    ]) {
+      await assert.rejects(mutate(), /only available on Windows/)
+    }
+    assert.equal(app.runtimeInstallStatus, 'idle')
+    assert.equal(app.runtimeCoreUpdateStatus, 'idle')
+    await app.checkEnv()
+    await app.loadRuntimeEnvSizes()
+    assert.deepEqual(commands, ['runtime_info', 'get_env_info', 'runtime_env_sizes'])
+    app.$dispose()
+  })
+}
 
 for (const action of [
   {

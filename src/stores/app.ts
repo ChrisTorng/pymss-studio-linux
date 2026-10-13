@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { createRuntimeQueryQueue, createRuntimeReadCache } from '@/utils/runtimeQueries'
+import { supportsRuntimeManagement } from '@/utils/runtime'
 import { isTauriRuntime } from '@/utils/appStore'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
 
@@ -542,7 +543,16 @@ export const useAppStore = defineStore('app', () => {
   const loadRuntimeCoreVersions = () => runtimeVersionsCache.read(queryRuntimeCoreVersions, true)
   const ensureRuntimeCoreVersions = () => runtimeVersionsCache.read(queryRuntimeCoreVersions)
 
+  const runtimeManagementSupported = computed(() => supportsRuntimeManagement({
+    platform: runtimeInfo.value?.platform || envInfo.value?.platform,
+  }))
+
+  function requireRuntimeManagement() {
+    if (!runtimeManagementSupported.value) throw new Error('Runtime management is only available on Windows.')
+  }
+
   async function installRuntime(backend: RuntimeBackend, mirror = 'auto', locale = '') {
+    requireRuntimeManagement()
     const taskId = `runtime_install_${crypto.randomUUID()}`
     runtimeInstallTaskId.value = taskId
     runtimeInstallStatus.value = 'installing'
@@ -565,6 +575,7 @@ export const useAppStore = defineStore('app', () => {
     locale = '',
     target: { pythonPath?: string; repairDependencies?: boolean } = {},
   ) {
+    requireRuntimeManagement()
     const taskId = `runtime_core_update_${crypto.randomUUID()}`
     runtimeCoreUpdateTaskId.value = taskId
     runtimeCoreUpdateStatus.value = 'updating'
@@ -585,6 +596,7 @@ export const useAppStore = defineStore('app', () => {
     target: { pythonPath?: string } = {},
     options: { refreshCoreVersions?: boolean; onlyIfNoActive?: boolean } = {},
   ) {
+    requireRuntimeManagement()
     const payload = {
       backend,
       ...target,
@@ -613,6 +625,7 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function updateDebugRuntime<T>(command: RuntimeDebugCommand, payload: Record<string, unknown>): Promise<T> {
+    requireRuntimeManagement()
     const result = await mutateRuntime(() => invoke<T>(command, { payload }))
     // A debug write may deliberately leave the interpreter unusable. Preserve the
     // successful file-write result while recording probe failures in diagnostics.
@@ -653,6 +666,7 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function deleteRuntime(backend: RuntimeBackend, target: { pythonPath?: string } = {}) {
+    requireRuntimeManagement()
     await mutateRuntime(() => invoke('delete_runtime', { payload: { backend, ...target } }))
     await checkRuntimeInfo()
   }
@@ -756,6 +770,7 @@ export const useAppStore = defineStore('app', () => {
     checkEnv,
     checkEnvInBackground,
     runtimeInfo,
+    runtimeManagementSupported,
     runtimeInfoLoading,
     runtimeInfoError,
     runtimeInstallTaskId,
