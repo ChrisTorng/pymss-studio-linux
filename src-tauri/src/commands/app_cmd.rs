@@ -5,7 +5,7 @@ use crate::model_dir_migration::{
     StartModelDirMigrationRequest,
 };
 use crate::python::worker::{
-    cleanup_editor_export_temp_files, editor_export_task_token, run_worker_once,
+    bundled_bin_dirs, cleanup_editor_export_temp_files, editor_export_task_token, run_worker_once,
     run_worker_with_payload, spawn_worker_background,
 };
 use crate::session_log::{self, DebugLogContent, DebugLogInfo, DebugLogReport};
@@ -154,6 +154,14 @@ pub async fn start_managed_update(
 #[tauri::command]
 pub async fn worker_health(app: AppHandle) -> AppResult<Value> {
     run_worker_once(&app, "health")
+}
+
+#[tauri::command]
+pub async fn debug_editor_playback(app: AppHandle, snapshot: Value) -> AppResult<()> {
+    if session_log::developer_mode_enabled() {
+        session_log::append(&app, "DEBUG", "editor.playback", vec![("snapshot", snapshot.to_string())]);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1963,6 +1971,64 @@ pub async fn get_audio_metadata(app: AppHandle, payload: Value) -> AppResult<Val
     run_worker_with_payload(&app, "audio_metadata", Some(payload))
 }
 
+const EDITOR_PREVIEW_CHUNK_SECONDS: u64 = 4;
+
+fn decode_editor_preview_chunk(ffmpeg: &Path, path: &Path, index: u64, sample_rate: u32, channels: u32) -> AppResult<Vec<u8>> {
+    if !(8_000..=192_000).contains(&sample_rate) || !(1..=2).contains(&channels) || index > 216_000 {
+        return Err(AppError::Worker("Invalid preview chunk parameters".into()));
+    }
+    if !path.is_absolute() || !path.is_file() {
+        return Err(AppError::Worker("Preview audio file is unavailable".into()));
+    }
+    let mut command = Command::new(ffmpeg);
+    let start = index * EDITOR_PREVIEW_CHUNK_SECONDS;
+    let warm_start = start.saturating_sub(1);
+    // Warm compressed decoders before the boundary, preserve original stream
+    // timestamps, and trim there. A direct input seek can discard AAC priming
+    // samples twice or begin MP3 decoding without its previous-frame state.
+    command.args(["-nostdin", "-v", "error", "-threads", "1", "-copyts", "-start_at_zero"]);
+    // Even an input seek to zero can reapply MP4/AAC priming. The first chunk
+    // must follow the normal decode path from the beginning.
+    if start > 0 { command.arg("-ss").arg(warm_start.to_string()); }
+    command.arg("-i").arg(path)
+        .args(["-map", "0:a:0", "-vn", "-af"])
+        // Reset the warmup window's timestamps before resampling, keeping its
+        // phase on the same sample grid as a full decode (including MP4/AAC).
+        // Trim AFTER resampling so both boundaries retain neighboring samples.
+        .arg(format!("atrim=start={warm_start},asetpts=PTS-{warm_start}/TB,aresample={sample_rate}:first_pts=0,atrim=start={}:duration={EDITOR_PREVIEW_CHUNK_SECONDS},asetpts=PTS-STARTPTS", start - warm_start))
+        .arg("-t").arg(EDITOR_PREVIEW_CHUNK_SECONDS.to_string())
+        .arg("-ar").arg(sample_rate.to_string())
+        .arg("-ac").arg(channels.to_string())
+        .args(["-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        return Err(AppError::Worker(format!("Preview decode failed: {}", String::from_utf8_lossy(&output.stderr))));
+    }
+    let frame_bytes = channels as usize * 4;
+    let limit = EDITOR_PREVIEW_CHUNK_SECONDS as usize * sample_rate as usize * frame_bytes;
+    if output.stdout.len() > limit || output.stdout.len() % frame_bytes != 0 {
+        return Err(AppError::Worker("Invalid decoded preview chunk".into()));
+    }
+    Ok(output.stdout)
+}
+
+#[tauri::command]
+pub async fn editor_preview_chunk(app: AppHandle, path: String, index: u64, sample_rate: u32, channels: u32) -> AppResult<tauri::ipc::Response> {
+    let ffmpeg_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    let ffmpeg = bundled_bin_dirs(&app)?.into_iter()
+        .map(|dir| dir.join(ffmpeg_name)).find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from(ffmpeg_name));
+    let data = tauri::async_runtime::spawn_blocking(move || {
+        decode_editor_preview_chunk(&ffmpeg, Path::new(&path), index, sample_rate, channels)
+    }).await.map_err(|error| AppError::Worker(error.to_string()))??;
+    Ok(tauri::ipc::Response::new(data))
+}
+
 #[tauri::command]
 pub async fn generate_waveform_peaks(app: AppHandle, payload: Value) -> AppResult<Value> {
     let mut payload = payload;
@@ -3538,5 +3604,99 @@ mod tests {
         fs::remove_dir(&link).unwrap();
         assert!(is_effectively_empty_dir(&root));
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn invalid_requests_are_rejected_before_spawning() {
+        for (rate, channels, index) in [(0, 2, 0), (48_000, 3, 0), (48_000, 2, u64::MAX)] {
+            assert!(decode_editor_preview_chunk(Path::new("not-a-program"), Path::new("/missing"), index, rate, channels).is_err());
+        }
+        assert!(decode_editor_preview_chunk(Path::new("not-a-program"), Path::new("relative.wav"), 0, 48_000, 2).is_err());
+    }
+
+    fn preview_wave_fixture(rate: u32) -> PathBuf {
+        let mut pcm = Vec::new();
+        for frame in 0..rate * 9 {
+            let sample = ((frame % 997) as i16 - 498) * 40;
+            pcm.extend_from_slice(&sample.to_le_bytes());
+            pcm.extend_from_slice(&(-sample).to_le_bytes());
+        }
+        let mut wav = b"RIFF".to_vec();
+        wav.extend_from_slice(&(pcm.len() as u32 + 36).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 4).to_le_bytes());
+        wav.extend_from_slice(&4u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(pcm.len() as u32).to_le_bytes());
+        wav.extend_from_slice(&pcm);
+        let path = temp_test_dir("preview-chunks").with_extension("wav");
+        std::fs::write(&path, wav).unwrap();
+        path
+    }
+
+    #[test]
+    fn consecutive_chunks_match_a_full_decode_without_missing_or_repeating_samples() {
+        let ffmpeg = Path::new("ffmpeg");
+        if Command::new(ffmpeg).arg("-version").output().is_err() {
+            eprintln!("FFmpeg not on PATH; skipping native codec check");
+            return;
+        }
+        for source_rate in [44_100, 48_000, 96_000] {
+            let path = preview_wave_fixture(source_rate);
+            for rate in [44_100, 48_000] {
+                let full = Command::new(ffmpeg).args(["-v", "error", "-i"]).arg(&path)
+                    .arg("-ar").arg(rate.to_string())
+                    .args(["-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"]).output().unwrap();
+                let pieces: Vec<_> = (0..3).map(|index| decode_editor_preview_chunk(ffmpeg, &path, index, rate, 2).unwrap()).collect();
+                assert!(full.status.success());
+                assert_eq!(pieces[0].len(), rate as usize * 4 * 2 * 4);
+                assert_eq!(pieces[2].len(), rate as usize * 2 * 4);
+                assert_eq!(pieces.concat(), full.stdout, "resampling {source_rate} to {rate} changed chunk samples");
+            }
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn compressed_preview_chunks_keep_gapless_timing_and_sample_alignment() {
+        let ffmpeg = Path::new("ffmpeg");
+        if Command::new(ffmpeg).arg("-version").output().is_err() {
+            eprintln!("FFmpeg not on PATH; skipping compressed codec check");
+            return;
+        }
+        let wave = preview_wave_fixture(44_100);
+        for (codec, extension) in [("libmp3lame", "mp3"), ("aac", "m4a"), ("aac", "aac"), ("libopus", "opus")] {
+            let encoded = wave.with_extension(extension);
+            let mut encoder = Command::new(ffmpeg);
+            encoder.args(["-v", "error", "-y", "-i"]).arg(&wave).arg("-c:a").arg(codec);
+            // Make the AAC fixture deterministic, without random perceptual noise.
+            if codec == "aac" { encoder.args(["-aac_pns", "0"]); }
+            let encoded_result = encoder.arg(&encoded).output().unwrap();
+            if !encoded_result.status.success() {
+                eprintln!("Encoder {codec} unavailable; skipping its fixture");
+                continue;
+            }
+            for rate in [44_100, 48_000] {
+                let full = Command::new(ffmpeg).args(["-v", "error", "-threads", "1", "-i"]).arg(&encoded)
+                    .arg("-ar").arg(rate.to_string())
+                    .args(["-ac", "2", "-c:a", "pcm_f32le", "-f", "f32le", "pipe:1"])
+                    .output().unwrap();
+                assert!(full.status.success());
+                let pieces: Vec<_> = (0..3).map(|index| decode_editor_preview_chunk(ffmpeg, &encoded, index, rate, 2).unwrap()).collect();
+                let joined = pieces.concat();
+                assert_eq!(joined.len(), full.stdout.len(), "{extension} at {rate} lost samples at a chunk boundary");
+                let max_error = joined.chunks_exact(4).zip(full.stdout.chunks_exact(4))
+                    .map(|(a, b)| (f32::from_le_bytes(a.try_into().unwrap()) - f32::from_le_bytes(b.try_into().unwrap())).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(max_error < 0.00001, "{extension} at {rate} chunk alignment error: {max_error}");
+            }
+            fs::remove_file(&encoded).unwrap();
+        }
+        fs::remove_file(wave).unwrap();
     }
 }

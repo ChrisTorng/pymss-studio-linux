@@ -1,4 +1,4 @@
-"""Exercise editor playback with real media elements against a running Vite server.
+"""Exercise the Windows media-element transport in Chromium against Vite.
 
 Use a dedicated Vite server with HMR and file watching disabled so that creating
 or cleaning up the temporary fixture cannot reload the active playback page.
@@ -18,6 +18,8 @@ from playwright.sync_api import sync_playwright
 
 HTML = """<!doctype html><html><body><div id="app"></div>
 <script type="module">
+// Select the legacy Windows transport even when this smoke runs on macOS.
+Object.defineProperty(navigator, 'platform', { value: 'Win32' })
 import { createApp, reactive, ref, h } from 'vue'
 import { createPinia } from 'pinia'
 import { useEditorPlayback } from '/src/composables/useEditorPlayback.ts'

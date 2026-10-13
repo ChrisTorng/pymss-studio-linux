@@ -7,6 +7,7 @@ import { effectScope, reactive, ref, watch, nextTick } from 'vue'
 import { createPinia, setActivePinia, storeToRefs } from 'pinia'
 import { useEditorPlaybackStore } from '../src/stores/editorPlayback.ts'
 import { clipIsActive, clipMediaTime, clipsForTrack } from '../src/utils/editorClips.ts'
+import { EditorTimelinePlayback } from '../src/utils/editorAudio.ts'
 
 const source = ts.createSourceFile('playback.ts', readFileSync(new URL('../src/composables/useEditorPlayback.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true)
 const code = ts.transpileModule(source.statements.filter(item => !ts.isImportDeclaration(item)).map(item => item.getText(source)).join('\n').replace('export function useEditorPlayback', 'function useEditorPlayback'), {
@@ -19,23 +20,40 @@ function deferred() {
   return { promise, resolve, reject }
 }
 
-function environment(t, { clips = [{ start: 0, offset: 0, duration: 20 }], contextState = 'running', resumeGate } = {}) {
-  let now = 0, rafId = 0, unmount
+function environment(t, { clips = [{ start: 0, offset: 0, duration: 20 }], contextState = 'running', resumeGate, platform = '', chunksGate, metadataReadyState = 4 } = {}) {
+  let now = 0, rafId = 0, unmount, parameterWrites = 0, contextCreations = 0, chunkReads = 0
   const frames = new Map(), audios = []
   const graphNodes = new Map()
   const node = () => new Proxy({
-    connect() {}, disconnect() {}, fftSize: 256,
+    connections: [],
+    connect(destination) { this.connections.push(destination) },
+    disconnect() { this.connections = [] }, fftSize: 256,
     getByteTimeDomainData(buffer) { buffer.fill(128) },
-  }, { get(target, key) { return key in target ? target[key] : (target[key] = { value: 0 }) } })
+  }, { get(target, key) {
+    if (key in target) return target[key]
+    let value = 0
+    return (target[key] = {
+      get value() { return value },
+      set value(next) { parameterWrites++; value = next },
+      cancelScheduledValues() {}, setValueAtTime() {}, linearRampToValueAtTime() {},
+    })
+  } })
   const ctx = new Proxy({
-    state: contextState, sampleRate: 48000, destination: node(),
+    state: contextState, sampleRate: 48000, currentTime: 0, destination: node(),
     async resume() { if (resumeGate) await resumeGate.promise; this.state = 'running' },
     async close() { this.state = 'closed' },
-    createBuffer(channels, length) { return { sampleRate: 48000, numberOfChannels: channels, getChannelData: () => new Float32Array(length) } },
+    createBuffer(channels, length) { return { sampleRate: 48000, length, duration: length / 48000,
+      numberOfChannels: channels, getChannelData: () => new Float32Array(length) } },
   }, { get(target, key) {
     if (key in target) return target[key]
     return () => {
       const created = node()
+      if (key === 'createBufferSource') {
+        created.starts = []
+        created.stopped = false
+        created.start = (...args) => created.starts.push(args)
+        created.stop = () => { created.stopped = true }
+      }
       graphNodes.set(key, [...(graphNodes.get(key) || []), created])
       return created
     }
@@ -44,7 +62,7 @@ function environment(t, { clips = [{ start: 0, offset: 0, duration: 20 }], conte
   class FakeAudio extends EventTarget {
     _time = 0
     duration = 60
-    readyState = 4
+    readyState = metadataReadyState
     paused = true
     seeking = false
     ended = false
@@ -115,12 +133,17 @@ function environment(t, { clips = [{ start: 0, offset: 0, duration: 20 }], conte
     masterVolume: 1, masterPan: 0,
   })
   const create = vm.runInNewContext(`${code}\nuseEditorPlayback`, {
-    watch, storeToRefs, useEditorPlaybackStore, clipIsActive, clipMediaTime, clipsForTrack,
+    watch, storeToRefs, useEditorPlaybackStore, clipIsActive, clipMediaTime, clipsForTrack, EditorTimelinePlayback,
+    createPreviewChunkReader: () => async () => {
+      chunkReads++
+      if (chunksGate) await chunksGate.promise
+      return ctx.createBuffer(2, 48000 * 4)
+    },
     onBeforeUnmount: callback => { unmount = callback },
     convertFileSrc: value => value,
     createEditorAudioElement: url => { const audio = new FakeAudio(); audio.src = url; audios.push(audio); return audio },
     i18n: { global: { t: key => key } },
-    window: { AudioContext: function () { return ctx } },
+    window: { AudioContext: function () { contextCreations++; return ctx }, navigator: { platform } },
     performance: { now: () => now },
     requestAnimationFrame: callback => { frames.set(++rafId, callback); return rafId },
     cancelAnimationFrame: id => frames.delete(id),
@@ -132,12 +155,14 @@ function environment(t, { clips = [{ start: 0, offset: 0, duration: 20 }], conte
   t.after(dispose)
   function frame(ms = 16, advanceMedia = true) {
     now += ms
+    if (ctx.state === 'running') ctx.currentTime += ms / 1000
     if (advanceMedia) audios.forEach(audio => audio.advance(ms))
     const pending = [...frames.values()]
     frames.clear()
     pending.forEach(callback => callback(now))
   }
-  return { playback, store, editor, audios, ctx, graphNodes, frame, dispose }
+  return { playback, store, editor, audios, ctx, graphNodes, frame, dispose,
+    resources: () => ({ contextCreations, chunkReads }), parameterWrites: () => parameterWrites }
 }
 
 test('a stalled media clock does not advance the playhead or trigger repeated seeks', async t => {
@@ -151,6 +176,50 @@ test('a stalled media clock does not advance the playhead or trigger repeated se
   for (let i = 0; i < 120; i++) env.frame()
   assert.equal(audio.seeks.length, before)
   assert.ok(Math.abs(env.store.currentTime - 0.1) < 0.001)
+})
+
+test('disabled effects bypass DSP and steady playback retains the graph', async t => {
+  const env = environment(t)
+  await env.playback.requestPlay()
+  const filter = env.graphNodes.get('createBiquadFilter')[0]
+  const compressor = env.graphNodes.get('createDynamicsCompressor')[0]
+  const reverb = env.graphNodes.get('createConvolver')[0]
+  const delay = env.graphNodes.get('createDelay')[0]
+  for (const effect of [filter, compressor, reverb, delay]) {
+    assert.ok(![...env.graphNodes.values()].flat().some(node => node.connections.includes(effect)))
+  }
+  const connections = [...env.graphNodes.values()].flat().map(node => node.connections)
+  const writes = env.parameterWrites()
+  for (let index = 0; index < 100; index++) env.frame()
+  assert.deepEqual([...env.graphNodes.values()].flat().map(node => node.connections), connections)
+  assert.equal(env.parameterWrites(), writes)
+  assert.equal(env.audios[0].playCalls, 1)
+  assert.equal(env.audios[0].seeks.length, 0)
+})
+
+test('enabling and disabling effects reconnects DSP without restarting media', async t => {
+  const env = environment(t)
+  await env.playback.requestPlay()
+  const track = env.editor.session.tracks[0]
+  const effects = ['createBiquadFilter', 'createDynamicsCompressor', 'createConvolver', 'createDelay']
+    .map(kind => env.graphNodes.get(kind)[0])
+  track.effects = { clarity: 0.3, compressor: 0.4, reverb: 0.2, delay: 0.1, delayTime: 0.24 }
+  await flush()
+  for (const effect of effects) {
+    assert.ok([...env.graphNodes.values()].flat().some(node => node.connections.includes(effect)))
+  }
+  const routing = [...env.graphNodes.values()].flat().map(node => node.connections)
+  track.effects.reverb = 0.4
+  track.effects.delayTime = 0.36
+  await flush()
+  assert.deepEqual([...env.graphNodes.values()].flat().map(node => node.connections), routing)
+  track.effects = { clarity: 0, compressor: 0, reverb: 0, delay: 0, delayTime: 0.24 }
+  await flush()
+  for (const effect of effects) {
+    assert.ok(![...env.graphNodes.values()].flat().some(node => node.connections.includes(effect)))
+  }
+  assert.equal(env.audios[0].playCalls, 1)
+  assert.equal(env.audios[0].seeks.length, 0)
 })
 
 test('buffering one track holds the group and resumes without a wall-clock jump', async t => {
@@ -553,4 +622,146 @@ test('buffering intentionally cancels a pending clip start without failing the m
   assert.equal(env.store.status, 'playing')
   assert.ok(env.store.currentTime > 1)
   assert.ok(env.audios.every(audio => !audio.paused))
+})
+
+
+test('macOS transport schedules later clips with one clock instead of separate media players', async t => {
+  const env = environment(t, { platform: 'MacIntel', clips: [
+    { start: 0, offset: 0, duration: 20 }, { start: 2, offset: 4, duration: 10 },
+  ] })
+  assert.equal(await env.playback.requestPlay(), true)
+  assert.equal(env.audios.length, 0)
+  const starts = env.graphNodes.get('createBufferSource').map(node => node.starts[0])
+  assert.ok(starts.some(([when, offset]) => Math.abs(when - 2.06) < 1e-8 && offset === 0))
+  // A delayed UI frame must not start the second clip early or move its start.
+  env.frame(2500)
+  assert.ok(Math.abs(env.store.currentTime - 2.44) < 1e-8)
+  assert.equal(env.store.status, 'playing')
+  env.playback.requestPause()
+  assert.ok(env.graphNodes.get('createBufferSource').every(node => node.stopped))
+  assert.equal(env.store.currentTime, 2.44)
+})
+
+test('a macOS pause cancels startup waiting for decoded chunks immediately', async t => {
+  const gate = deferred()
+  const env = environment(t, { platform: 'MacIntel', chunksGate: gate })
+  const playing = env.playback.requestPlay()
+  await flush()
+  env.playback.requestPause()
+  assert.equal(await playing, false)
+  gate.resolve()
+  await flush()
+  assert.equal(env.store.status, 'paused')
+  assert.equal(env.graphNodes.get('createBufferSource')?.length || 0, 0)
+})
+
+test('background sample-rate hydration replaces an in-flight macOS start', async t => {
+  const gate = deferred()
+  const env = environment(t, { platform: 'MacIntel', chunksGate: gate })
+  const starting = env.playback.requestPlay()
+  await flush()
+  const request = env.store.requestId
+  env.editor.sourceMap.get('source-0').sampleRate = 44100
+  await flush()
+  assert.ok(env.store.requestId > request)
+  assert.equal(await starting, false)
+  gate.resolve()
+  await flush()
+  assert.equal(env.store.status, 'playing')
+  assert.equal(env.store.error, null)
+})
+
+test('sample-rate hydration does not restart the Windows media transport', async t => {
+  const env = environment(t)
+  assert.equal(await env.playback.requestPlay(), true)
+  env.frame(100)
+  const request = env.store.requestId
+  env.editor.sourceMap.get('source-0').sampleRate = 44100
+  await flush()
+  assert.equal(env.store.requestId, request)
+  assert.equal(env.audios[0].playCalls, 1)
+  assert.equal(env.audios[0].seeks.length, 0)
+  env.frame(100)
+  assert.equal(env.store.currentTime, 0.2)
+})
+
+test('a rejected macOS play request stops existing audio and retains its error', async t => {
+  const env = environment(t, { platform: 'MacIntel' })
+  assert.equal(await env.playback.requestPlay(), true)
+  env.frame(100)
+  const nodes = env.graphNodes.get('createBufferSource')
+  env.editor.sourceMap.get('source-0').missing = true
+  assert.equal(await env.playback.requestPlay(), false)
+  await flush()
+  assert.equal(env.store.status, 'error')
+  assert.match(env.store.error, /assetOfflineBlocked/)
+  assert.ok(nodes.every(node => node.stopped))
+})
+
+for (const looping of [false, true]) {
+  test(`macOS playback ${looping ? 'loops' : 'finishes'} when animation frames stop`, async t => {
+    const env = environment(t, { platform: 'MacIntel', clips: [{ start: 0, offset: 0, duration: 1 }] })
+    env.store.setLoop(looping)
+    assert.equal(await env.playback.requestPlay(), true)
+    env.ctx.currentTime = 2
+    // The audio timer runs, while no UI frame is dispatched.
+    await new Promise(resolve => setTimeout(resolve, 150))
+    assert.equal(env.store.status, looping ? 'playing' : 'paused')
+    assert.equal(env.store.currentTime, 0)
+    const sources = env.graphNodes.get('createBufferSource')
+    if (looping) assert.ok(sources.some(node => node.starts[0][0] >= 2.06 && !node.stopped))
+    else assert.ok(sources.every(node => node.stopped))
+  })
+}
+
+test('unmounting before macOS warmup resumes prevents recreation of audio resources', async t => {
+  const env = environment(t, { platform: 'MacIntel' })
+  env.dispose()
+  const resources = env.resources()
+  await flush()
+  assert.equal(env.ctx.state, 'closed')
+  assert.deepEqual(env.resources(), resources)
+  assert.equal(env.resources().chunkReads, 0)
+  // A retained warmup callback must also remain inert after unmount.
+  await env.playback.preloadActiveTracks()
+  assert.deepEqual(env.resources(), resources)
+})
+
+test('late Windows metadata does not recreate the audio context after unmount', async t => {
+  const env = environment(t, { metadataReadyState: 0 })
+  env.dispose()
+  const resources = env.resources()
+  env.audios[0].dispatchEvent(new Event('loadedmetadata'))
+  await flush()
+  assert.equal(env.ctx.state, 'closed')
+  assert.deepEqual(env.resources(), resources)
+})
+
+test('pending native warmup decoding remains cancelled after unmount', async t => {
+  const gate = deferred()
+  const env = environment(t, { platform: 'MacIntel', chunksGate: gate })
+  await flush()
+  assert.ok(env.resources().chunkReads > 0)
+  env.dispose()
+  const resources = env.resources()
+  gate.resolve()
+  await flush()
+  assert.deepEqual(env.resources(), resources)
+  assert.equal(env.graphNodes.get('createBufferSource')?.length || 0, 0)
+})
+
+test('metadata completion from a previous project cannot start a new project warmup', async t => {
+  const env = environment(t, { metadataReadyState: 0 })
+  const audio = env.audios[0]
+  env.editor.session.id = 'replacement-project'
+  await flush()
+  const pending = env.playback.preloadActiveTracks()
+  const resources = env.resources()
+  env.editor.session = null
+  await flush()
+  audio.dispatchEvent(new Event('loadedmetadata'))
+  env.audios.forEach(audio => audio.dispatchEvent(new Event('loadedmetadata')))
+  await pending
+  await flush()
+  assert.deepEqual(env.resources(), resources)
 })

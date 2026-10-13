@@ -122,6 +122,8 @@ fn main() {
             commands::app_cmd::debug_log_clear,
             commands::app_cmd::debug_log_create_report,
             commands::app_cmd::debug_log_info,
+            commands::app_cmd::debug_editor_playback,
+            commands::app_cmd::editor_preview_chunk,
             commands::app_cmd::debug_log_read,
             commands::app_cmd::check_managed_update,
             commands::app_cmd::start_managed_update,

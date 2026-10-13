@@ -446,7 +446,7 @@ fn is_user_runtime_python_path(app: &AppHandle, path: &str) -> AppResult<bool> {
     )
 }
 
-fn bundled_bin_dirs(app: &AppHandle) -> AppResult<Vec<PathBuf>> {
+pub(crate) fn bundled_bin_dirs(app: &AppHandle) -> AppResult<Vec<PathBuf>> {
     let resource = app.path().resource_dir().ok();
     let exe_dir = std::env::current_exe()?
         .parent()
