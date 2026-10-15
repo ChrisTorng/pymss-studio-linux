@@ -72,7 +72,9 @@ function clamp(value: number, min: number, max: number) {
 export function useEditorPlayback(options: PlaybackOptions) {
   const { editor, scrollEl } = options
   const trackHeaderWidth = options.trackHeaderWidth ?? 0
-  const useScheduledAudio = typeof window !== 'undefined' && /Mac/i.test(window.navigator?.platform || '')
+  // Keep Windows and macOS previews on one output clock. Independent media
+  // clocks require correction seeks that restart decoding while scrubbing.
+  const useScheduledAudio = typeof window !== 'undefined' && /Mac|Win/i.test(window.navigator?.platform || '')
   const playback = useEditorPlaybackStore()
   const {
     intent,
@@ -555,10 +557,10 @@ export function useEditorPlayback(options: PlaybackOptions) {
     const primaryUrl = resolveAudioUrl(source.path)
     const fallbackUrl = resolveFileFallbackUrl(source.path)
     const ctx = ensureAudioContext()
-    const isMac = Boolean(ctx && useScheduledAudio)
+    const isScheduled = Boolean(ctx && useScheduledAudio)
     // Scheduled audio connects directly to the graph; only the media transport
     // owns an HTMLAudioElement.
-    const audio = isMac ? null : createEditorAudioElement(primaryUrl)
+    const audio = isScheduled ? null : createEditorAudioElement(primaryUrl)
 
     const entry: ManagedAudio = {
       clipId: clip.id,

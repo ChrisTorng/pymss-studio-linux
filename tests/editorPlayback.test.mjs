@@ -625,8 +625,9 @@ test('buffering intentionally cancels a pending clip start without failing the m
 })
 
 
-test('macOS transport schedules later clips with one clock instead of separate media players', async t => {
-  const env = environment(t, { platform: 'MacIntel', clips: [
+for (const platform of ['MacIntel', 'Win32']) {
+test(`${platform} transport schedules later clips with one clock instead of separate media players`, async t => {
+  const env = environment(t, { platform, clips: [
     { start: 0, offset: 0, duration: 20 }, { start: 2, offset: 4, duration: 10 },
   ] })
   assert.equal(await env.playback.requestPlay(), true)
@@ -640,6 +641,48 @@ test('macOS transport schedules later clips with one clock instead of separate m
   env.playback.requestPause()
   assert.ok(env.graphNodes.get('createBufferSource').every(node => node.stopped))
   assert.equal(env.store.currentTime, 2.44)
+})
+}
+
+test('Windows rapid seeks stop the old output and resume only the latest decoded position', async t => {
+  const gate = deferred()
+  const env = environment(t, { platform: 'Win32', chunksGate: gate })
+  const starting = env.playback.requestPlay()
+  await flush()
+  env.playback.seek(5)
+  env.playback.seek(9)
+  env.playback.seek(1.2)
+  env.frame(2000)
+  assert.equal(env.store.currentTime, 1.2)
+  gate.resolve()
+  assert.equal(await starting, false)
+  await flush()
+  assert.equal(env.audios.length, 0)
+  assert.equal(env.store.status, 'playing')
+  const nodes = env.graphNodes.get('createBufferSource')
+  assert.ok(nodes.length > 0)
+  assert.equal(nodes[0].starts[0][1], 1.2)
+  assert.ok(nodes.every(node => node.starts[0][0] >= 2.06))
+  env.frame(100)
+  assert.ok(Math.abs(env.store.currentTime - 1.24) < 1e-8)
+})
+
+test('Windows cached seeks replace scheduled audio without decoding or accelerating the clock', async t => {
+  const env = environment(t, { platform: 'Win32' })
+  assert.equal(await env.playback.requestPlay(0.1), true)
+  await flush()
+  const reads = env.resources().chunkReads
+  const previous = [...env.graphNodes.get('createBufferSource')]
+  for (const time of [0.2, 0.7, 0.3]) env.playback.seek(time)
+  await flush()
+  assert.ok(previous.every(node => node.stopped))
+  assert.equal(env.resources().chunkReads, reads)
+  assert.equal(env.audios.length, 0)
+  assert.equal(env.store.status, 'playing')
+  env.frame(260)
+  assert.ok(Math.abs(env.store.currentTime - 0.5) < 1e-8)
+  env.frame(200)
+  assert.ok(Math.abs(env.store.currentTime - 0.7) < 1e-8)
 })
 
 test('a macOS pause cancels startup waiting for decoded chunks immediately', async t => {
@@ -671,7 +714,7 @@ test('background sample-rate hydration replaces an in-flight macOS start', async
   assert.equal(env.store.error, null)
 })
 
-test('sample-rate hydration does not restart the Windows media transport', async t => {
+test('sample-rate hydration does not restart the fallback media transport', async t => {
   const env = environment(t)
   assert.equal(await env.playback.requestPlay(), true)
   env.frame(100)
@@ -727,7 +770,7 @@ test('unmounting before macOS warmup resumes prevents recreation of audio resour
   assert.deepEqual(env.resources(), resources)
 })
 
-test('late Windows metadata does not recreate the audio context after unmount', async t => {
+test('late fallback media metadata does not recreate the audio context after unmount', async t => {
   const env = environment(t, { metadataReadyState: 0 })
   env.dispose()
   const resources = env.resources()
