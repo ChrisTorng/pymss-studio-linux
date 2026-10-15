@@ -1149,35 +1149,35 @@ onMounted(() => {
           <!-- Card Header -->
           <div class="mc-header">
             <div class="mc-title">
-              <div class="mc-name-row">
-                <span class="mc-name" :title="model.name"><template v-for="(part, index) in modelNameParts(model.name)" :key="index">{{ part }}<wbr /></template></span>
-                <n-button
-                  quaternary
-                  circle
-                  size="tiny"
-                  :type="isFavoriteModel(model) ? 'warning' : 'default'"
-                  :title="isFavoriteModel(model) ? t('models.unfavorite') : t('models.favorite')"
-                  :aria-label="isFavoriteModel(model) ? t('models.unfavorite') : t('models.favorite')"
-                  class="mc-favorite"
-                  @click.stop="toggleFavorite(model, $event)"
-                >
-                  <template #icon>
-                    <n-icon :component="isFavoriteModel(model) ? Star : StarOutline" />
-                  </template>
-                </n-button>
-                <n-button
-                  quaternary
-                  circle
-                  size="tiny"
-                  class="mc-more"
-                  :title="t('models.moreActions')"
-                  :aria-label="t('models.moreActions')"
-                  @click.stop="openModelContextMenu($event, model)"
-                >
-                  <template #icon><n-icon :component="EllipsisHorizontalOutline" /></template>
-                </n-button>
-              </div>
+              <span class="mc-name" :title="model.name"><template v-for="(part, index) in modelNameParts(model.name)" :key="index">{{ part }}<wbr /></template></span>
               <span v-if="modelNote(model)" class="mc-note" :title="modelNote(model)">{{ modelNote(model) }}</span>
+            </div>
+            <div class="mc-controls">
+              <n-button
+                quaternary
+                circle
+                size="tiny"
+                :type="isFavoriteModel(model) ? 'warning' : 'default'"
+                :title="isFavoriteModel(model) ? t('models.unfavorite') : t('models.favorite')"
+                :aria-label="isFavoriteModel(model) ? t('models.unfavorite') : t('models.favorite')"
+                class="mc-favorite"
+                @click.stop="toggleFavorite(model, $event)"
+              >
+                <template #icon>
+                  <n-icon :component="isFavoriteModel(model) ? Star : StarOutline" />
+                </template>
+              </n-button>
+              <n-button
+                quaternary
+                circle
+                size="tiny"
+                class="mc-more"
+                :title="t('models.moreActions')"
+                :aria-label="t('models.moreActions')"
+                @click.stop="openModelContextMenu($event, model)"
+              >
+                <template #icon><n-icon :component="EllipsisHorizontalOutline" /></template>
+              </n-button>
             </div>
           </div>
           <!-- Meta Tags -->
@@ -1940,30 +1940,34 @@ onMounted(() => {
    the pieces and made long lists harder to scan. ---- */
 .model-grid--list .model-card {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(112px, 160px) minmax(230px, 280px);
+  grid-template-columns: minmax(0, 1fr) minmax(112px, 160px) minmax(230px, 280px) auto;
   grid-template-areas:
-    "header tags bottom"
-    "meta   tags bottom";
+    "header tags bottom controls"
+    "meta   tags bottom controls";
   align-items: center;
   gap: 8px 14px;
   padding: 14px 16px 17px;
 }
 
-.model-grid--list .mc-header { grid-area: header; min-width: 0; }
+.model-grid--list .mc-header { display: contents; }
+.model-grid--list .mc-title { grid-area: header; }
+.model-grid--list .mc-controls { grid-area: controls; }
 .model-grid--list .mc-meta { grid-area: meta; min-width: 0; }
 .model-grid--list .mc-tags { grid-area: tags; }
 .model-grid--list .mc-bottom { grid-area: bottom; justify-content: flex-end; gap: 12px; }
 
-/* A narrow window cannot hold three columns; stack rather than crush them. */
+/* Stack metadata in narrow windows while keeping controls beside the title. */
 @container model-library (max-width: 760px) {
   .model-grid--list .model-card {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas:
-      "header"
-      "tags"
-      "meta"
-      "bottom";
+      "header controls"
+      "tags tags"
+      "meta meta"
+      "bottom bottom";
   }
+
+  .model-grid--list .mc-controls { align-self: start; }
 
   .model-grid--list .mc-bottom {
     justify-content: space-between;
@@ -2153,6 +2157,7 @@ onMounted(() => {
 .mc-header {
   display: flex;
   align-items: flex-start;
+  gap: 4px;
   min-width: 0;
 }
 
@@ -2163,12 +2168,11 @@ onMounted(() => {
   min-width: 0;
 }
 
-.mc-name-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: flex-start;
+.mc-controls {
+  display: flex;
+  align-items: center;
   gap: 4px;
-  min-width: 0;
+  flex-shrink: 0;
 }
 
 .mc-name {
