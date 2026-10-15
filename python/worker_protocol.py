@@ -30,6 +30,19 @@ except Exception:
     pass
 
 _PROTOCOL_STDOUT: TextIO | None = None
+_BOUND_REQUEST_ID: str | None = None
+
+
+@contextmanager
+def bind_request_id(request_id: str | None) -> Iterator[None]:
+    """Tag events emitted without an explicit request id with ``request_id``."""
+    global _BOUND_REQUEST_ID
+    previous = _BOUND_REQUEST_ID
+    _BOUND_REQUEST_ID = request_id
+    try:
+        yield
+    finally:
+        _BOUND_REQUEST_ID = previous
 
 
 @contextmanager
@@ -99,7 +112,7 @@ def emit(event_type: str, payload: dict[str, Any] | None = None, *, request_id: 
     payload = payload or {}
     message = json.dumps({
         "type": event_type,
-        "requestId": request_id,
+        "requestId": request_id if request_id is not None else _BOUND_REQUEST_ID,
         "taskId": task_id,
         "timestamp": now_iso(),
         "payload": payload,

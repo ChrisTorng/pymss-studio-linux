@@ -4,6 +4,7 @@ mod commands;
 mod error;
 mod model_dir_migration;
 mod python;
+mod rba;
 mod session_log;
 mod single_instance;
 mod state;
@@ -99,6 +100,7 @@ fn main() {
             commands::app_cmd::start_editor_mix_export,
             commands::app_cmd::cancel_editor_mix_export,
             commands::app_cmd::start_audio_tool,
+            commands::tempo_key::start_tempo_key_analysis,
             commands::app_cmd::get_app_paths,
             commands::app_cmd::get_env_info,
             commands::app_cmd::generate_waveform_peaks,

@@ -2340,6 +2340,9 @@ pub async fn cancel_task(
     {
         return Ok(false);
     }
+    if super::tempo_key::cancel_native_task(&state, &task_id) {
+        return Ok(true);
+    }
     let child = state
         .tasks
         .lock()

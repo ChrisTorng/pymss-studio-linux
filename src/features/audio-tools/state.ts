@@ -7,13 +7,19 @@ export type StoredAudioToolsState = {
   mergeSortDirection?: 'asc' | 'desc'
   mergeRegex?: string
   midiModelPath?: string
-  midiLanguage?: string
   asrModelMode?: 'preset' | 'local'
   asrPreset?: string
   asrLanguage?: string
   asrModelPath?: string
   asrVadModelPath?: string
   asrPuncModelPath?: string
+  loudnessMeasurement?: string
+  loudnessTarget?: number
+  loudnessTolerance?: number
+  loudnessMaxTruePeak?: number
+  loudnessUseLimiter?: boolean
+  loudnessLookahead?: number
+  loudnessRelease?: number
 }
 
 let queue: Promise<void> = Promise.resolve()
