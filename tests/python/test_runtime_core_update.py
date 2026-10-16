@@ -107,7 +107,8 @@ class RuntimeCoreVersionTests(unittest.TestCase):
 
 class RuntimeOverlayUpdateTests(unittest.TestCase):
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp())
+        # Temporary roots may use Windows short names or macOS /var symlinks.
+        self.root = Path(tempfile.mkdtemp()).resolve()
         self.envs = self.root / "runtime-envs"
         self.envs.mkdir()
         self.active = self.envs / "active-runtime.json"

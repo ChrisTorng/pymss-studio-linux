@@ -188,7 +188,7 @@ class RuntimeOverlayDeletionTests(unittest.TestCase):
 
 class LegacyRuntimeOverlayTests(unittest.TestCase):
     def setUp(self):
-        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
         self.user = self.root / "user/runtime-envs"
         self.bundled = self.root / "package/python-runtime/runtime-envs"
         self.python = self.bundled / "cpu/bin/python"
@@ -253,7 +253,7 @@ class LegacyRuntimeOverlayTests(unittest.TestCase):
 class ActivationRecoveryTests(unittest.TestCase):
     def setUp(self):
         directory = self.enterContext(tempfile.TemporaryDirectory())
-        self.root = Path(directory)
+        self.root = Path(directory).resolve()
         self.active = self.root / "active-runtime.json"
         self.enterContext(mock.patch.object(worker, "RUNTIME_ENVS_DIR", self.root))
         self.enterContext(mock.patch.object(worker, "ACTIVE_RUNTIME_FILE", self.active))
