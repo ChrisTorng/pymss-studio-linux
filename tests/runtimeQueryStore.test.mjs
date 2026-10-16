@@ -276,7 +276,7 @@ test('the macOS MLX runtime still supports selecting CPU as an inference device'
 })
 
 for (const platform of ['darwin', 'linux']) {
-  test(`${platform} rejects runtime mutations before IPC and preserves read-only probes`, async () => {
+  test(`${platform} rejects environment management before IPC and preserves read-only probes`, async () => {
     const commands = []
     const app = appStore(async command => {
       commands.push(command)
@@ -287,11 +287,11 @@ for (const platform of ['darwin', 'linux']) {
     })
     await app.checkRuntimeInfo()
     assert.equal(app.runtimeManagementSupported, false)
+    assert.equal(app.runtimeCoreUpdateSupported, true)
     for (const mutate of [
       () => app.installRuntime('cpu'),
       () => app.activateRuntime('cpu'),
       () => app.deleteRuntime('cpu'),
-      () => app.updateRuntimeCore('cpu'),
       () => app.updateDebugRuntime('debug_runtime_write_file', { path: '/runtime/active-runtime.json', content: '{}' }),
       () => app.updateDebugRuntime('debug_runtime_restore_file', { path: '/runtime/active-runtime.json' }),
       () => app.updateDebugRuntime('debug_runtime_override_active', { backend: 'cpu', pythonPath: '/runtime/cpu/bin/python' }),
@@ -303,6 +303,32 @@ for (const platform of ['darwin', 'linux']) {
     await app.checkEnv()
     await app.loadRuntimeEnvSizes()
     assert.deepEqual(commands, ['runtime_info', 'get_env_info', 'runtime_env_sizes'])
+    app.$dispose()
+  })
+
+  test(`${platform} updates the active core and refreshes its versions after success`, async () => {
+    const calls = []
+    const refreshed = deferred()
+    let infoCalls = 0
+    const app = appStore(async command => {
+      calls.push(command)
+      if (command === 'runtime_info') {
+        if (++infoCalls === 2) refreshed.resolve()
+        return { platform, ready: true }
+      }
+      if (command === 'start_runtime_core_update') return true
+      if (command === 'runtime_core_versions') return { packages: { pymss: { latestVersion: '2.2.0' } } }
+      if (command === 'get_env_info') return { platform }
+      throw new Error(`unexpected ${command}`)
+    })
+    await app.checkRuntimeInfo()
+    const taskId = await within(app.updateRuntimeCore('cpu'), 'cross-platform core update ACK')
+    assert.ok(calls.includes('start_runtime_core_update'))
+    app.handleRuntimeEvent({ type: 'runtime_core_update_finished', taskId, payload: {} })
+    await within(refreshed.promise, 'runtime refresh after core update')
+    await app.ensureRuntimeCoreVersions()
+    assert.equal(app.runtimeCoreVersions.packages.pymss.latestVersion, '2.2.0')
+    assert.equal(app.runtimeManagementSupported, false)
     app.$dispose()
   })
 }
@@ -936,6 +962,128 @@ test('core-update ACK returns before its terminal success, then refreshes withou
   assert.ok(calls.includes('runtime_core_versions'))
 })
 
+const preparedCorePlan = {
+  id: '0123456789abcdef0123456789abcdef', backend: 'cpu', pythonPath: '/runtime/bin/python',
+  mode: 'update', channel: 'stable', mirror: 'pypi',
+  currentVersions: { pymss: '2.1.8', 'pymss-core': '0.1.11' },
+  targetVersions: { pymss: '2.1.9', 'pymss-core': '0.1.11' }, dependencyCount: 0,
+}
+
+test('core planning releases the write queue for confirmation and apply forwards the confirmed plan', async () => {
+  const calls = []
+  const dispatched = deferred()
+  const app = appStore(async (command, args) => {
+    calls.push({ command, args })
+    if (command === 'start_runtime_core_update') { dispatched.resolve(); return true }
+    if (command === 'runtime_info') return { ready: true }
+    if (command === 'get_env_info' || command === 'runtime_core_versions') return {}
+    throw new Error(`unexpected ${command}`)
+  })
+  const preparation = app.prepareRuntimeCoreUpdate('cpu', 'pypi', 'zh-CN', { mode: 'update' })
+  await within(dispatched.promise, 'plan dispatch')
+  const taskId = app.runtimeCoreUpdateTaskId
+  assert.equal(app.runtimeCoreUpdateStatus, 'preparing')
+  assert.equal(calls[0].args.payload.prepareOnly, true)
+  app.handleRuntimeEvent({ type: 'runtime_core_update_plan', taskId, payload: preparedCorePlan })
+  const plan = await within(preparation, 'prepared plan result')
+  assert.deepEqual(plan, preparedCorePlan)
+  assert.equal(app.runtimeCoreUpdateStatus, 'prepared')
+  await within(app.checkRuntimeInfo(), 'read while waiting for user confirmation')
+  const applyId = await app.updateRuntimeCore('cpu', 'pypi', 'zh-CN', { planId: plan.id, mode: plan.mode })
+  const apply = calls.filter(call => call.command === 'start_runtime_core_update')[1]
+  assert.equal(apply.args.payload.planId, plan.id)
+  assert.equal(apply.args.payload.prepareOnly, undefined)
+  app.handleRuntimeEvent({ type: 'runtime_core_update_finished', taskId: applyId, payload: {} })
+  await within(app.checkRuntimeInfo(), 'post-activation queries')
+  app.$dispose()
+})
+
+test('a plan completion before its start ACK settles the waiter without dispatching queries early', async () => {
+  const started = deferred()
+  const ack = deferred()
+  const calls = []
+  const app = appStore(async command => {
+    calls.push(command)
+    if (command === 'start_runtime_core_update') { started.resolve(); return ack.promise }
+    if (command === 'runtime_info') return { ready: true }
+    throw new Error(`unexpected ${command}`)
+  })
+  const preparation = app.prepareRuntimeCoreUpdate('cpu', 'auto', '', { mode: 'sync' })
+  await within(started.promise, 'early plan dispatch')
+  app.handleRuntimeEvent({ type: 'runtime_core_update_plan', taskId: app.runtimeCoreUpdateTaskId, payload: preparedCorePlan })
+  await within(preparation, 'plan completion before ACK')
+  const query = app.checkRuntimeInfo()
+  await Promise.resolve()
+  assert.deepEqual(calls, ['start_runtime_core_update'])
+  ack.resolve(true)
+  await within(query, 'query after plan ACK')
+  app.$dispose()
+})
+
+for (const terminal of ['error', 'task_cancelled']) {
+  test(`planning ${terminal} rejects its waiter and releases following queries`, async () => {
+    const started = deferred()
+    const app = appStore(async command => {
+      if (command === 'start_runtime_core_update') { started.resolve(); return true }
+      if (command === 'runtime_info') return { ready: true }
+      throw new Error(`unexpected ${command}`)
+    })
+    const preparation = app.prepareRuntimeCoreUpdate('cpu', 'auto', '', { mode: 'update' })
+    const rejected = assert.rejects(preparation, terminal === 'error' ? /plan failed/ : /cancelled/)
+    await within(started.promise, 'failed plan dispatch')
+    app.handleRuntimeEvent({ type: terminal, taskId: app.runtimeCoreUpdateTaskId, payload: { message: 'plan failed' } })
+    await within(rejected, 'plan rejection')
+    await within(app.checkRuntimeInfo(), 'query after plan rejection')
+    assert.equal(app.runtimeCoreUpdateTaskId, null)
+    app.$dispose()
+  })
+}
+
+test('channel changes invalidate discovery and late replies cannot overwrite the new channel', async () => {
+  const stable = deferred()
+  const preview = deferred()
+  const requests = []
+  const app = appStore(async (command, args) => {
+    assert.equal(command, 'runtime_core_versions')
+    requests.push(args.payload)
+    return args.payload.channel === 'stable' ? stable.promise : preview.promise
+  })
+  const settings = useSettingsStore()
+  app.runtimeInfo = { platform: 'win32', pymssVersion: '2.2.0rc1', pymssCoreVersion: '0.1.11' }
+  const old = app.loadRuntimeCoreVersions()
+  settings.updateChannel = 'prerelease'
+  await nextTick()
+  preview.resolve({ channel: 'prerelease', packages: { pymss: { latestVersion: '2.3.0rc1', currentVersion: '2.2.0rc1', updateAvailable: true } } })
+  await within(app.ensureRuntimeCoreVersions(), 'new channel discovery')
+  stable.resolve({ channel: 'stable', packages: { pymss: { latestVersion: '2.2.0' } } })
+  await old
+  assert.equal(app.runtimeCoreVersions.channel, 'prerelease')
+  assert.equal(app.runtimeCoreVersions.packages.pymss.latestVersion, '2.3.0rc1')
+  assert.equal(requests.length, 2)
+  assert.equal(requests[0].versions.pymss, '2.2.0rc1')
+  app.$dispose()
+  settings.$dispose()
+})
+
+test('successful core activation immediately updates the active Windows path alias before probes complete', async () => {
+  const pending = deferred()
+  const app = appStore(async command => command === 'start_runtime_core_update' ? true : pending.promise)
+  app.runtimeInfo = {
+    manifestVersion: '2026.10.2', installedBackend: 'cpu',
+    installState: { pythonPath: 'C:/runtime/cpu/Scripts/python.exe' },
+    installedEnvironments: [{ backend: 'cpu', pythonPath: '\\\\?\\C:\\runtime\\cpu\\Scripts\\python.exe', pymssVersion: '2.1.8' }],
+  }
+  const taskId = await app.updateRuntimeCore('cpu', 'pypi', '', { planId: preparedCorePlan.id })
+  app.handleRuntimeEvent({ type: 'runtime_core_update_finished', taskId, payload: {
+    state: { pythonPath: 'C:/runtime/cpu/Scripts/python.exe', pymssVersion: '2.1.9', pymssCoreVersion: '0.1.11' }, rollbackAvailable: true,
+  } })
+  assert.equal(app.runtimeInfo.installedEnvironments[0].pymssVersion, '2.1.9')
+  assert.equal(app.runtimeInfo.rollbackAvailable, true)
+  pending.resolve({})
+  await within(app.checkRuntimeInfo(), 'post-activation probe drain')
+  app.$dispose()
+})
+
 test('dependency repair reuses the core-update queue and forwards repair mode', async () => {
   const calls = []
   const app = appStore(async (command, args) => {
@@ -960,6 +1108,7 @@ test('dependency repair reuses the core-update queue and forwards repair mode', 
         backend: 'cuda',
         mirror: 'pypi',
         locale: 'zh-CN',
+        channel: 'stable',
         pythonPath: 'D:/runtime/cuda/Scripts/python.exe',
         repairDependencies: true,
       },
@@ -1004,7 +1153,7 @@ test('active core-update cancellation ACK releases the queue when its event is a
   assert.equal(await app.cancelRuntimeCoreUpdate(), true)
   await within(query, 'query after core cancellation ACK')
   assert.equal(app.runtimeCoreUpdateTaskId, null)
-  assert.deepEqual(calls, ['start_runtime_core_update', 'cancel_runtime_core_update', 'runtime_info'])
+  assert.deepEqual(calls, ['start_runtime_core_update', 'cancel_runtime_core_update', 'runtime_info', 'runtime_info'])
 })
 
 test('background start waits for worker-event registration before dispatching', async () => {

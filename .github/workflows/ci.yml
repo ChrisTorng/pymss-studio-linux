@@ -10,6 +10,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  runtime-safety:
+    name: Runtime safety (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify runtime plans, activation recovery, and offline package updates
+        run: python -m unittest discover -s tests/python -t tests -p "test_runtime_core_*.py"
+
   validate:
     runs-on: windows-latest
     timeout-minutes: 30

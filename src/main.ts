@@ -99,12 +99,12 @@ async function bootstrap() {
       }
     }
     const activeRuntime = activeRuntimeEnvironment(runtime)
-    if (runtime.ready && (!appState.runtimeManagementSupported || !runtimeCoreSyncAvailable(activeRuntime, runtime.manifestVersion))) {
+    if (runtime.ready && (!appState.runtimeCoreUpdateSupported || !runtimeCoreSyncAvailable(activeRuntime, runtime.manifestVersion))) {
       void models.loadModels().catch((error) => {
         console.warn('Failed to preload model metadata', error)
       })
     }
-    if (appState.runtimeManagementSupported && runtime.installedEnvironments?.some((env) => env.coreUpdateSupported !== false)) {
+    if (appState.runtimeCoreUpdateSupported && runtime.installedEnvironments?.some((env) => env.coreUpdateSupported !== false)) {
       void appState.loadRuntimeCoreVersions().catch((error) => {
         console.warn('Failed to check runtime core versions', error)
       })

@@ -526,8 +526,8 @@ pub async fn runtime_env_sizes(app: AppHandle) -> AppResult<Value> {
 }
 
 #[tauri::command]
-pub async fn runtime_core_versions(app: AppHandle) -> AppResult<Value> {
-    run_worker_with_payload(&app, "runtime_core_versions", None)
+pub async fn runtime_core_versions(app: AppHandle, payload: Option<Value>) -> AppResult<Value> {
+    run_worker_with_payload(&app, "runtime_core_versions", payload)
 }
 
 #[tauri::command]
@@ -3197,7 +3197,6 @@ pub async fn start_runtime_core_update(
     state: State<'_, AppState>,
     payload: Value,
 ) -> AppResult<Value> {
-    require_windows_runtime_management()?;
     let task_id = payload
         .get("taskId")
         .and_then(Value::as_str)

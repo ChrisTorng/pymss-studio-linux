@@ -1,9 +1,15 @@
-import type { EnvInfo, InstalledRuntime, RuntimeBackend, RuntimeInfo } from '@/stores/app'
+import type { EnvInfo, InstalledRuntime, RuntimeBackend, RuntimeCoreVersions, RuntimeInfo } from '@/stores/app'
 
 export function supportsRuntimeManagement(info: Pick<RuntimeInfo, 'platform'> | null | undefined): boolean {
   const reported = String(info?.platform || '').toLowerCase()
   if (reported) return reported === 'win32' || reported === 'windows'
   return typeof navigator !== 'undefined' && /^win/i.test(navigator.platform)
+}
+
+export function supportsRuntimeCoreUpdate(info: Pick<RuntimeInfo, 'platform'> | null | undefined): boolean {
+  const reported = String(info?.platform || '').toLowerCase()
+  if (reported) return ['win32', 'windows', 'darwin', 'linux'].includes(reported)
+  return typeof navigator !== 'undefined' && /^(win|mac|linux)/i.test(navigator.platform)
 }
 
 export function runtimeLoadError(info: RuntimeInfo | null | undefined, env: EnvInfo | null | undefined): string {
@@ -120,8 +126,7 @@ export function runtimeToActivate(info: RuntimeInfo | null | undefined): Install
 
 export function runtimeCoreUpdateAvailable(
   env: InstalledRuntime | undefined,
-  latestPymssVersion: string | null | undefined,
-  latestPymssCoreVersion: string | null | undefined,
+  comparison: RuntimeCoreVersions | null | undefined,
   currentManifestVersion: string | undefined,
 ) {
   if (!env || env.coreUpdateSupported === false) return false
@@ -130,8 +135,8 @@ export function runtimeCoreUpdateAvailable(
   const pymssVersion = env.pymssVersion || env.packageVersions?.pymss || ''
   const pymssCoreVersion = env.pymssCoreVersion || env.packageVersions?.['pymss-core'] || ''
   return Boolean(
-    versionGreaterThan(latestPymssVersion, pymssVersion)
-    || versionGreaterThan(latestPymssCoreVersion, pymssCoreVersion),
+    (comparison?.packages?.pymss?.currentVersion === pymssVersion && comparison.packages?.pymss?.updateAvailable)
+    || (comparison?.packages?.['pymss-core']?.currentVersion === pymssCoreVersion && comparison.packages?.['pymss-core']?.updateAvailable),
   )
 }
 
@@ -148,18 +153,6 @@ export function runtimeCoreSyncAvailable(
   const manifestStatus = runtimeManifestStatus(env, currentManifestVersion)
   return manifestStatus === 'older'
     || (manifestStatus === 'current' && env.pymssGraphAvailable === false)
-}
-
-function versionGreaterThan(candidate: string | null | undefined, current: string | null | undefined) {
-  const left = parseVersionParts(candidate)
-  const right = parseVersionParts(current)
-  if (!left || !right) return false
-  const length = Math.max(left.length, right.length)
-  for (let index = 0; index < length; index += 1) {
-    const difference = (left[index] || 0) - (right[index] || 0)
-    if (difference !== 0) return difference > 0
-  }
-  return false
 }
 
 function parseVersionParts(value: string | null | undefined) {

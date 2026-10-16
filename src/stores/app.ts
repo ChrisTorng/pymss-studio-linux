@@ -1,10 +1,11 @@
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { createRuntimeQueryQueue, createRuntimeReadCache } from '@/utils/runtimeQueries'
-import { supportsRuntimeManagement } from '@/utils/runtime'
+import { activeRuntimeEnvironment, supportsRuntimeCoreUpdate, supportsRuntimeManagement } from '@/utils/runtime'
 import { isTauriRuntime } from '@/utils/appStore'
 import { registerWindowCloseGuard } from '@/utils/windowCloseGuards'
+import { useSettingsStore } from '@/stores/settings'
 
 export type EnvInfo = {
   pythonVersion?: string
@@ -34,8 +35,21 @@ export type EnvInfo = {
 }
 
 export type RuntimeBackend = 'cpu' | 'cuda' | 'rocm' | 'mlx'
+export type RuntimeCoreMode = 'update' | 'sync' | 'repair' | 'rollback'
+export type RuntimeCorePlan = {
+  id: string
+  backend: RuntimeBackend
+  pythonPath: string
+  mode: RuntimeCoreMode
+  channel: 'stable' | 'prerelease'
+  mirror: string
+  currentVersions: Record<string, string | null>
+  targetVersions: Record<string, string>
+  dependencyCount: number
+}
 type RuntimeDebugCommand = 'debug_runtime_override_active' | 'debug_runtime_write_file' | 'debug_runtime_restore_file'
 export type RuntimeInfo = {
+  rollbackAvailable?: boolean
   manifestVersion?: string
   pythonVersion?: string
   platform?: string
@@ -102,8 +116,11 @@ export type InstalledRuntime = {
 }
 
 export type RuntimeCoreVersions = {
+  channel?: 'stable' | 'prerelease'
   packages?: Record<string, {
     latestVersion?: string | null
+    currentVersion?: string | null
+    updateAvailable?: boolean
     error?: string
   }>
 }
@@ -128,6 +145,7 @@ export type DiagnosticItem = {
 export type WorkerEventConnectionStatus = 'idle' | 'connecting' | 'connected' | 'error'
 
 export const useAppStore = defineStore('app', () => {
+  const settings = useSettingsStore()
   const envInfo = ref<EnvInfo | null>(null)
   const envLoading = ref(false)
   const envError = ref<string | null>(null)
@@ -148,9 +166,11 @@ export const useAppStore = defineStore('app', () => {
   const runtimeCoreVersions = ref<RuntimeCoreVersions | null>(null)
   const runtimeCoreVersionsLoading = ref(false)
   const runtimeCoreUpdateTaskId = ref<string | null>(null)
-  const runtimeCoreUpdateStatus = ref<'idle' | 'updating' | 'success' | 'error' | 'cancelled'>('idle')
+  const runtimeCoreUpdateStatus = ref<'idle' | 'preparing' | 'prepared' | 'updating' | 'success' | 'error' | 'cancelled'>('idle')
   const runtimeCoreUpdateMessage = ref('')
-  const runtimeCoreUpdateMode = ref<'update' | 'repair'>('update')
+  const runtimeCoreUpdateMode = ref<RuntimeCoreMode>('update')
+  const runtimeCoreUpdateStage = ref('')
+  const corePlanWaiters = new Map<string, { resolve: (plan: RuntimeCorePlan) => void; reject: (error: Error) => void }>()
   const runtimeEnvSizes = ref<Record<string, number>>({})
   const runtimeEnvSizesLoading = ref(false)
   const runtimeEnvSizesError = ref('')
@@ -524,6 +544,7 @@ export const useAppStore = defineStore('app', () => {
 
   async function queryRuntimeCoreVersions() {
     const request = ++runtimeVersionsRequest
+    const channel = settings.updateChannel
     runtimeVersionsWaiting += 1
     runtimeCoreVersionsLoading.value = true
     try {
@@ -531,8 +552,12 @@ export const useAppStore = defineStore('app', () => {
         runtimeCoreVersions.value = null
         return runtimeCoreVersions.value
       }
-      const result = await invoke<RuntimeCoreVersions>('runtime_core_versions')
-      if (request === runtimeVersionsRequest) runtimeCoreVersions.value = result
+      const info = runtimeInfo.value
+      const result = await invoke<RuntimeCoreVersions>('runtime_core_versions', { payload: {
+        channel,
+        versions: { pymss: info?.pymssVersion || info?.installState?.pymssVersion, 'pymss-core': info?.pymssCoreVersion || info?.installState?.pymssCoreVersion },
+      } })
+      if (request === runtimeVersionsRequest && channel === settings.updateChannel) runtimeCoreVersions.value = result
       return result
     } finally {
       runtimeVersionsWaiting -= 1
@@ -542,8 +567,17 @@ export const useAppStore = defineStore('app', () => {
 
   const loadRuntimeCoreVersions = () => runtimeVersionsCache.read(queryRuntimeCoreVersions, true)
   const ensureRuntimeCoreVersions = () => runtimeVersionsCache.read(queryRuntimeCoreVersions)
+  watch(() => settings.updateChannel, () => {
+    runtimeVersionsRequest += 1
+    runtimeVersionsCache.invalidate()
+    runtimeCoreVersions.value = null
+    if (runtimeCoreUpdateSupported.value && runtimeInfo.value) void loadRuntimeCoreVersions().catch(() => {})
+  })
 
   const runtimeManagementSupported = computed(() => supportsRuntimeManagement({
+    platform: runtimeInfo.value?.platform || envInfo.value?.platform,
+  }))
+  const runtimeCoreUpdateSupported = computed(() => supportsRuntimeCoreUpdate({
     platform: runtimeInfo.value?.platform || envInfo.value?.platform,
   }))
 
@@ -573,22 +607,53 @@ export const useAppStore = defineStore('app', () => {
     backend: RuntimeBackend,
     mirror = 'auto',
     locale = '',
-    target: { pythonPath?: string; repairDependencies?: boolean } = {},
+    target: { pythonPath?: string; repairDependencies?: boolean; planId?: string; mode?: RuntimeCoreMode; prepareOnly?: boolean } = {},
   ) {
-    requireRuntimeManagement()
+    if (!runtimeCoreUpdateSupported.value) throw new Error('Runtime core updates are unavailable on this platform.')
     const taskId = `runtime_core_update_${crypto.randomUUID()}`
     runtimeCoreUpdateTaskId.value = taskId
     runtimeCoreUpdateStatus.value = 'updating'
     runtimeCoreUpdateMessage.value = ''
-    runtimeCoreUpdateMode.value = target.repairDependencies ? 'repair' : 'update'
+    runtimeCoreUpdateStage.value = ''
+    runtimeCoreUpdateMode.value = target.mode || (target.repairDependencies ? 'repair' : 'update')
+    if (target.prepareOnly) runtimeCoreUpdateStatus.value = 'preparing'
     try {
-      await startRuntimeBackground('start_runtime_core_update', taskId, { taskId, backend, mirror, locale, ...target }, 'runtime_core_update_finished')
+      await startRuntimeBackground('start_runtime_core_update', taskId, { taskId, backend, mirror, locale, channel: settings.updateChannel, ...target }, target.prepareOnly ? 'runtime_core_update_plan' : 'runtime_core_update_finished')
     } catch (error) {
       runtimeCoreUpdateStatus.value = 'error'
       runtimeCoreUpdateMessage.value = error instanceof Error ? error.message : String(error)
       throw error
     }
     return taskId
+  }
+
+  async function prepareRuntimeCoreUpdate(backend: RuntimeBackend, mirror: string, locale: string, target: { pythonPath?: string; mode: RuntimeCoreMode }) {
+    // The waiter must be registered before dispatch: a cached plan may complete
+    // before the start acknowledgement is delivered to the webview.
+    const taskId = `runtime_core_update_${crypto.randomUUID()}`
+    let resolvePlan!: (plan: RuntimeCorePlan) => void
+    let rejectPlan!: (error: Error) => void
+    const completion = new Promise<RuntimeCorePlan>((resolve, reject) => { resolvePlan = resolve; rejectPlan = reject })
+    corePlanWaiters.set(taskId, { resolve: resolvePlan, reject: rejectPlan })
+    if (!runtimeCoreUpdateSupported.value) {
+      corePlanWaiters.delete(taskId)
+      throw new Error('Runtime core updates are unavailable on this platform.')
+    }
+    runtimeCoreUpdateTaskId.value = taskId
+    runtimeCoreUpdateStatus.value = 'preparing'
+    runtimeCoreUpdateMode.value = target.mode
+    runtimeCoreUpdateMessage.value = ''
+    runtimeCoreUpdateStage.value = ''
+    void startRuntimeBackground('start_runtime_core_update', taskId, {
+      taskId, backend, mirror, locale, ...target, channel: settings.updateChannel, prepareOnly: true,
+    }, 'runtime_core_update_plan').catch(error => {
+      corePlanWaiters.delete(taskId)
+      runtimeCoreUpdateStatus.value = 'error'
+      runtimeCoreUpdateMessage.value = error instanceof Error ? error.message : String(error)
+      runtimeCoreUpdateTaskId.value = null
+      rejectPlan(error instanceof Error ? error : new Error(String(error)))
+    })
+    return completion
   }
 
   async function activateRuntime(
@@ -639,6 +704,7 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function cancelRuntimeCoreUpdate() {
+    if (runtimeCoreUpdateStage.value === 'activate') return false
     if (!runtimeCoreUpdateTaskId.value) return false
     return cancelRuntimeBackground('cancel_runtime_core_update', runtimeCoreUpdateTaskId.value)
   }
@@ -649,7 +715,10 @@ export const useAppStore = defineStore('app', () => {
   registerWindowCloseGuard(async () => {
     if (!isTauriRuntime()) return
     if (runtimeInstallStatus.value === 'installing') await cancelRuntimeInstall()
-    if (runtimeCoreUpdateStatus.value === 'updating') await cancelRuntimeCoreUpdate()
+    if (runtimeCoreUpdateStatus.value === 'updating' || runtimeCoreUpdateStatus.value === 'preparing') {
+      if (runtimeCoreUpdateStage.value === 'activate') throw new Error('The runtime is being activated. Wait for the operation to finish.')
+      await cancelRuntimeCoreUpdate()
+    }
   }, 80)
 
   async function waitForRuntimeInstall(timeoutMs = 30 * 60 * 1000) {
@@ -682,14 +751,31 @@ export const useAppStore = defineStore('app', () => {
       operation.complete()
     }
     if (runtimeCoreUpdateTaskId.value && taskId === runtimeCoreUpdateTaskId.value) {
-      if (event?.type === 'runtime_core_update_finished') {
+      const waiter = corePlanWaiters.get(taskId)
+      if (event?.type === 'runtime_core_update_plan') {
+        runtimeCoreUpdateStatus.value = 'prepared'
+        runtimeCoreUpdateTaskId.value = null
+        runtimeCoreUpdateMessage.value = ''
+        runtimeCoreUpdateStage.value = ''
+        corePlanWaiters.delete(taskId)
+        waiter?.resolve(event.payload as RuntimeCorePlan)
+      } else if (event?.type === 'runtime_core_update_finished') {
         runtimeCoreUpdateStatus.value = 'success'
         runtimeCoreUpdateMessage.value = ''
         runtimeCoreUpdateTaskId.value = null
         if (event.payload?.state || event.payload?.logPath) {
+          const state = event.payload?.state
+          const previousActive = activeRuntimeEnvironment(runtimeInfo.value)
           runtimeInfo.value = {
             ...(runtimeInfo.value || {}),
-            installState: event.payload?.state,
+            ...(state ? {
+              pymssVersion: state.pymssVersion,
+              pymssCoreVersion: state.pymssCoreVersion,
+              packageVersions: state.packageVersions,
+              rollbackAvailable: event.payload?.rollbackAvailable === true,
+              installedEnvironments: runtimeInfo.value?.installedEnvironments?.map(env => env === previousActive ? { ...env, ...state, health: 'ready' } : env),
+            } : {}),
+            installState: state,
             logPath: event.payload?.logPath,
           }
         }
@@ -700,19 +786,25 @@ export const useAppStore = defineStore('app', () => {
           console.warn('Failed to refresh models after a runtime change', error)
         })
       } else if (event?.type === 'runtime_core_update_started') {
-        runtimeCoreUpdateStatus.value = 'updating'
-        runtimeCoreUpdateMode.value = event.payload?.mode === 'repair' ? 'repair' : 'update'
+        if (runtimeCoreUpdateStatus.value !== 'preparing') runtimeCoreUpdateStatus.value = 'updating'
+        runtimeCoreUpdateMode.value = event.payload?.mode || 'update'
         runtimeCoreUpdateMessage.value = event.payload?.backend || ''
         if (event.payload?.logPath) runtimeInfo.value = { ...(runtimeInfo.value || {}), logPath: event.payload.logPath }
       } else if (event?.type === 'runtime_core_update_stage' || event?.type === 'runtime_core_update_log') {
+        if (event?.type === 'runtime_core_update_stage') runtimeCoreUpdateStage.value = event.payload?.stage || ''
         runtimeCoreUpdateMessage.value = event.payload?.message || event.payload?.stage || ''
       } else if (event?.type === 'error') {
         runtimeCoreUpdateStatus.value = 'error'
         runtimeCoreUpdateMessage.value = event.payload?.message || 'Runtime core update failed'
         runtimeCoreUpdateTaskId.value = null
+        corePlanWaiters.delete(taskId)
+        waiter?.reject(new Error(runtimeCoreUpdateMessage.value))
       } else if (event?.type === 'task_cancelled') {
         runtimeCoreUpdateStatus.value = 'cancelled'
         runtimeCoreUpdateTaskId.value = null
+        corePlanWaiters.delete(taskId)
+        waiter?.reject(new Error('Runtime operation cancelled'))
+        void checkRuntimeInfo().catch(() => {})
       }
       return
     }
@@ -771,6 +863,7 @@ export const useAppStore = defineStore('app', () => {
     checkEnvInBackground,
     runtimeInfo,
     runtimeManagementSupported,
+    runtimeCoreUpdateSupported,
     runtimeInfoLoading,
     runtimeInfoError,
     runtimeInstallTaskId,
@@ -784,6 +877,8 @@ export const useAppStore = defineStore('app', () => {
     runtimeCoreUpdateStatus,
     runtimeCoreUpdateMessage,
     runtimeCoreUpdateMode,
+    runtimeCoreUpdateStage,
+    prepareRuntimeCoreUpdate,
     runtimeEnvSizes,
     runtimeEnvSizesLoading,
     runtimeEnvSizesError,

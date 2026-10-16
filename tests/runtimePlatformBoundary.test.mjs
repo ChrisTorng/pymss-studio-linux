@@ -81,13 +81,50 @@ for (const platform of ['darwin', 'linux', 'win32']) {
   }
 }
 
-test('non-Windows startup skips automatic runtime updates and update prompts', async () => {
+test('unsupported platforms skip core update prompts', () => {
   const actions = []
-  const scope = { app: { runtimeManagementSupported: false, updateRuntimeCore: async () => actions.push('update') } }
+  const scope = { app: { runtimeCoreUpdateSupported: false, updateRuntimeCore: async () => actions.push('update') } }
   componentFunction('../src/App.vue', 'showRuntimeCorePrompt', scope)()
-  await componentFunction('../src/App.vue', 'synchronizeRuntimeManifest', scope)()
   assert.deepEqual(actions, [])
 })
+
+for (const backend of ['mlx', 'cpu']) {
+  test(`${backend} startup requests confirmation and never starts a core synchronization`, () => {
+    const actions = []
+    const scope = {
+      app: { runtimeManagementSupported: false, runtimeCoreUpdateSupported: true, updateRuntimeCore: async (...args) => actions.push(args) },
+      runtimeCorePromptShown: { value: false },
+      bootReady: { value: true },
+      showStartupOnboarding: { value: false },
+      isStandaloneRoute: { value: false },
+      runtimeManifestSyncRequired: { value: true },
+      runtimeCoreUpdateAvailable: { value: true },
+      activeRuntime: { value: { backend, pythonPath: '/runtime/bin/python3' } },
+      runtimeCorePromptVisible: { value: false },
+    }
+    componentFunction('../src/App.vue', 'showRuntimeCorePrompt', scope)()
+    assert.equal(actions.length, 0)
+    assert.equal(scope.runtimeCorePromptVisible.value, true)
+  })
+}
+
+for (const confirmed of [false, true]) {
+  test(`settings ${confirmed ? 'applies' : 'discards'} the exact prepared plan after confirmation`, async () => {
+    const calls = []
+    const plan = { id: 'confirmed-plan', backend: 'mlx', pythonPath: '/runtime/bin/python', mode: 'update', mirror: 'pypi', channel: 'prerelease', currentVersions: { pymss: '2.1.8', 'pymss-core': '0.1.11' }, targetVersions: { pymss: '2.2.0rc1', 'pymss-core': '0.2.0' }, dependencyCount: 1 }
+    const scope = {
+      app: { runtimeCoreUpdateSupported: true, prepareRuntimeCoreUpdate: async () => { calls.push('prepare'); return plan }, updateRuntimeCore: async (...args) => calls.push(args) },
+      runtimeBusy: { value: false }, runtimeMirror: { value: 'auto' }, currentLocale: { value: 'zh-CN' },
+      t: (key, values) => `${key}:${JSON.stringify(values || {})}`,
+      confirmRuntimeAction: async (_title, content) => { assert.match(content, /2\.2\.0rc1/); return confirmed },
+      message: { error: error => assert.fail(error) },
+    }
+    await componentFunction('../src/views/SettingsView.vue', 'runRuntimeCoreOperation', scope)({ backend: 'mlx' }, 'update')
+    assert.equal(calls[0], 'prepare')
+    assert.equal(calls.length, confirmed ? 2 : 1)
+    if (confirmed) assert.equal(calls[1][3].planId, plan.id)
+  })
+}
 
 test('non-Windows developer controls cannot open an editor or mutate runtime files', async () => {
   const scope = { app: { runtimeManagementSupported: false } }

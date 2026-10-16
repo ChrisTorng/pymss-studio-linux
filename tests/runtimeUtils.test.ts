@@ -17,6 +17,7 @@ import {
   runtimeLoadError,
   runtimeSizeHint,
   supportsRuntimeManagement,
+  supportsRuntimeCoreUpdate,
 } from '../src/utils/runtime.ts'
 
 test('runtime management is available only on Windows regardless of browser platform', () => {
@@ -26,6 +27,13 @@ test('runtime management is available only on Windows regardless of browser plat
   assert.equal(supportsRuntimeManagement({ platform: 'darwin' }), false)
   assert.equal(supportsRuntimeManagement({ platform: 'linux' }), false)
   assert.equal(supportsRuntimeManagement({ platform: 'unknown' }), false)
+})
+
+test('core updates are available on all supported desktop platforms independently of environment management', () => {
+  for (const platform of ['win32', 'windows', 'darwin', 'linux']) {
+    assert.equal(supportsRuntimeCoreUpdate({ platform }), true)
+  }
+  assert.equal(supportsRuntimeCoreUpdate({ platform: 'unknown' }), false)
 })
 
 test('live probe diagnostics take priority while older runtime responses remain readable', () => {
@@ -175,28 +183,35 @@ test('runtime environment lookup does not guess when the active path is stale', 
 })
 
 test('runtime core update is available when pymss-core alone is behind', () => {
-  assert.equal(runtimeCoreUpdateAvailable({ manifestVersion: '2026.09.1', pymssVersion: '2.0.19', pymssCoreVersion: '0.1.4' }, '2.0.19', '0.1.6', '2026.09.1'), true)
+  assert.equal(runtimeCoreUpdateAvailable({ manifestVersion: '2026.09.1', pymssVersion: '2.0.19', pymssCoreVersion: '0.1.4' }, { packages: { 'pymss-core': { currentVersion: '0.1.4', updateAvailable: true } } }, '2026.09.1'), true)
+})
+
+test('core update availability uses PEP 440 comparison and ignores stale comparisons after a completed update', () => {
+  const comparison = { packages: { pymss: { currentVersion: '2.2.0rc1', latestVersion: '2.2.0', updateAvailable: true } } }
+  assert.equal(runtimeCoreUpdateAvailable({ manifestVersion: '2026.10.2', pymssVersion: '2.2.0rc1' }, comparison, '2026.10.2'), true)
+  assert.equal(runtimeCoreUpdateAvailable({ manifestVersion: '2026.10.2', pymssVersion: '2.2.0' }, comparison, '2026.10.2'), false)
 })
 
 test('runtime core update is hidden for non-updatable bootstrap runtimes', () => {
-  assert.equal(runtimeCoreUpdateAvailable({ manifestVersion: '2026.09.1', pymssVersion: '2.0.18', pymssCoreVersion: '0.1.4', coreUpdateSupported: false }, '2.0.19', '0.1.6', '2026.09.1'), false)
+  assert.equal(runtimeCoreUpdateAvailable({ manifestVersion: '2026.09.1', pymssVersion: '2.0.18', pymssCoreVersion: '0.1.4', coreUpdateSupported: false }, { packages: { pymss: { currentVersion: '2.0.18', updateAvailable: true } } }, '2026.09.1'), false)
 })
 
 test('runtime core update is hidden when the installed version is newer than PyPI', () => {
-  assert.equal(runtimeCoreUpdateAvailable({ manifestVersion: '2026.09.1', pymssVersion: '2.0.20', pymssCoreVersion: '0.1.7' }, '2.0.19', '0.1.6', '2026.09.1'), false)
+  assert.equal(runtimeCoreUpdateAvailable({ manifestVersion: '2026.09.1', pymssVersion: '2.0.20', pymssCoreVersion: '0.1.7' }, { packages: { pymss: { currentVersion: '2.0.20', updateAvailable: false } } }, '2026.09.1'), false)
 })
 
 test('package updates respect manifest compatibility in addition to package versions', () => {
   const env = { pymssVersion: '2.1.3', pymssCoreVersion: '0.1.6' }
+  const comparison = { packages: { pymss: { currentVersion: '2.1.3', updateAvailable: true } } }
   for (const manifestVersion of ['2026.09.1', '2026.08.1']) {
-    assert.equal(runtimeCoreUpdateAvailable({ ...env, manifestVersion }, '2.1.4', '0.1.6', '2026.09.1'), true)
+    assert.equal(runtimeCoreUpdateAvailable({ ...env, manifestVersion }, comparison, '2026.09.1'), true)
   }
   for (const manifestVersion of ['2026.10.1', undefined, '', 'legacy', '2026.09.1-invalid']) {
     const runtime = { ...env, manifestVersion }
-    assert.equal(runtimeCoreUpdateAvailable(runtime, '2.1.4', '0.1.6', '2026.09.1'), false)
+    assert.equal(runtimeCoreUpdateAvailable(runtime, comparison, '2026.09.1'), false)
     assert.equal(runtimeCoreSyncAvailable(runtime, '2026.09.1'), false)
   }
-  assert.equal(runtimeCoreUpdateAvailable({ ...env, manifestVersion: '2026.09.1' }, '2.1.4', '0.1.6', undefined), false)
+  assert.equal(runtimeCoreUpdateAvailable({ ...env, manifestVersion: '2026.09.1' }, comparison, undefined), false)
 })
 
 test('the only bundled runtime is selected for first-launch activation', () => {
