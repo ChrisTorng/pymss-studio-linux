@@ -1310,6 +1310,7 @@
     "runtimeCoreVersionUnknown": "未知",
     "runtimeCoreUpdate": "更新内核",
     "runtimeCoreUpdating": "正在更新内核…",
+    "runtimeCorePreparing": "正在检查版本和依赖，完成后请确认变更方案…",
     "runtimeCoreUpdateTitle": "更新 pymss 内核？",
     "runtimeCoreUpdateAvailable": "发现新版 pymss {pymss} / core {core}",
     "runtimeCoreUpdateSuccess": "pymss 内核已更新",

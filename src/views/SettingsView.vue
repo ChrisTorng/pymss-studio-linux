@@ -89,6 +89,9 @@ type BuildInfo = {
   official: boolean
 }
 const activeSection = ref<SettingsSection>('appearance')
+watch(() => route.query.section, (section) => {
+  if (section === 'runtime') activeSection.value = 'runtime'
+}, { immediate: true })
 const buildInfo = ref<BuildInfo | null>(null)
 const updateChecking = ref(false)
 const updateInstalling = ref(false)
@@ -166,9 +169,10 @@ watch(() => app.runtimeInstallLogs.length, () => {
   }
 })
 const runtimeInstalling = computed(() => app.runtimeInstallStatus === 'installing')
+const runtimeCoreActionPending = ref(false)
 const runtimeCoreUpdating = computed(() => app.runtimeCoreUpdateStatus === 'updating' || app.runtimeCoreUpdateStatus === 'preparing')
 // Runtime detection and install/switch/delete all access the runtime state, so only one may run at a time.
-const runtimeBusy = computed(() => runtimeDetecting.value || runtimeInstalling.value || runtimeCoreUpdating.value || runtimeActivating.value !== null || runtimeDeleting.value !== null)
+const runtimeBusy = computed(() => runtimeDetecting.value || runtimeInstalling.value || runtimeCoreUpdating.value || runtimeCoreActionPending.value || runtimeActivating.value !== null || runtimeDeleting.value !== null)
 const runtimeCurrentError = computed(() => {
   const error = runtimeLoadError(app.runtimeInfo, app.envInfo)
   return error.toLowerCase().includes('winerror 1455') ? t('settings.runtimePageFileError') : error
@@ -353,6 +357,8 @@ function confirmRuntimeAction(title: string, content: string, positiveText: stri
       onPositiveClick: () => resolve(true),
       onNegativeClick: () => resolve(false),
       onClose: () => resolve(false),
+      onMaskClick: () => resolve(false),
+      onEsc: () => resolve(false),
     })
   })
 }
@@ -532,7 +538,8 @@ async function detectRuntime() {
 }
 
 async function runRuntimeCoreOperation(card: { backend: RuntimeBackend; env?: InstalledRuntime }, mode: RuntimeCoreMode) {
-  if (!app.runtimeCoreUpdateSupported || runtimeBusy.value) return
+  if (!app.runtimeCoreUpdateSupported || runtimeBusy.value || runtimeCoreActionPending.value) return
+  runtimeCoreActionPending.value = true
   try {
     const plan = await app.prepareRuntimeCoreUpdate(card.backend, runtimeMirror.value, currentLocale.value, {
       pythonPath: card.env?.pythonPath,
@@ -553,7 +560,10 @@ async function runRuntimeCoreOperation(card: { backend: RuntimeBackend; env?: In
       }),
       t(mode === 'rollback' ? 'settings.runtimeCoreRollback' : mode === 'update' ? 'settings.runtimeCoreUpdate' : 'settings.runtimeCoreSync'),
     )
-    if (!confirmed) return
+    if (!confirmed) {
+      app.discardRuntimeCorePlan(plan.id)
+      return
+    }
     await app.updateRuntimeCore(plan.backend, plan.mirror, currentLocale.value, {
       pythonPath: plan.pythonPath,
       mode: plan.mode,
@@ -561,6 +571,8 @@ async function runRuntimeCoreOperation(card: { backend: RuntimeBackend; env?: In
     })
   } catch (error) {
     if (app.runtimeCoreUpdateStatus !== 'cancelled') message.error(error instanceof Error ? error.message : String(error))
+  } finally {
+    runtimeCoreActionPending.value = false
   }
 }
 
@@ -1136,7 +1148,6 @@ async function resolveModelDirConflict(action: 'overwrite' | 'skip' | 'abort') {
 }
 
 onMounted(async () => {
-  if (route.query.section === 'runtime') activeSection.value = 'runtime'
   await loadBuildInfo()
   if (updateSupported.value) {
     void checkForUpdates(false)
@@ -1798,7 +1809,7 @@ onMounted(async () => {
                 <div v-if="card.state === 'active' && runtimeCoreUpdating" class="runtime-env-card__progress">
                   <n-spin size="small" />
                   <span class="runtime-env-card__progress-msg">
-                    {{ app.runtimeCoreUpdateMessage || t(app.runtimeCoreUpdateMode === 'repair'
+                    {{ app.runtimeCoreUpdateStatus === 'preparing' ? t('settings.runtimeCorePreparing') : app.runtimeCoreUpdateMessage || t(app.runtimeCoreUpdateMode === 'repair'
                       ? 'settings.runtimeDependencyRepairing'
                       : 'settings.runtimeCoreUpdating') }}
                   </span>

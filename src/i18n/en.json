@@ -1310,6 +1310,7 @@
     "runtimeCoreVersionUnknown": "unknown",
     "runtimeCoreUpdate": "Update Core",
     "runtimeCoreUpdating": "Updating core...",
+    "runtimeCorePreparing": "Checking versions and dependencies. Review the plan when ready...",
     "runtimeCoreUpdateTitle": "Update pymss core?",
     "runtimeCoreUpdateAvailable": "New pymss {pymss} / core {core} available",
     "runtimeCoreUpdateSuccess": "pymss core updated",

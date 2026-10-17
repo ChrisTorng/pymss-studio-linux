@@ -69,8 +69,6 @@ jobs:
       contents: write
     env:
       RELEASE_VERSION_INPUT: ${{ github.event.inputs.version || github.ref_name }}
-      QUARK_COOKIE: ${{ secrets.QUARK_COOKIE }}
-      QUARKPAN_VERSION: "0.4.0"
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN }}
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -284,7 +282,8 @@ jobs:
           cd artifacts
           find . -maxdepth 1 -type f ! -name 'SHA256SUMS' -printf '%f\n' | sort | xargs -r sha256sum > SHA256SUMS
       - name: Stage artifacts for mirror uploads
-        if: ${{ env.QUARK_COOKIE != '' || env.HF_TOKEN != '' || env.MODELSCOPE_API_TOKEN != '' }}
+        id: stage_mirrors
+        if: ${{ env.HF_TOKEN != '' || env.MODELSCOPE_API_TOKEN != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -301,6 +300,7 @@ jobs:
           echo "Staged $copied file(s) under $staging/"
           ls -la "$staging"
       - uses: softprops/action-gh-release@v2
+        id: publish_release
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: ${{ env.RELEASE_NAME }}
@@ -319,45 +319,13 @@ jobs:
           overwrite_files: true
           files: artifacts/*-windows-x64-*.json
 
-      - name: Download Quark netdisk CLI
-        if: ${{ env.QUARK_COOKIE != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          asset="quarkpan-x86_64-unknown-linux-gnu.tar.gz"
-          url="https://github.com/HuanLinOTO/quarkpan-rs/releases/download/v${QUARKPAN_VERSION}/${asset}"
-          echo "Downloading $url"
-          curl -L -f --retry 3 -o "$asset" "$url"
-          curl -L -f --retry 3 -o "$asset.sha256" "$url.sha256"
-          # Verify integrity of the downloaded tarball against the published SHA256.
-          sha256sum -c "$asset.sha256"
-          tar -xzf "$asset"
-          quarkpan_bin="$(find . -maxdepth 2 -type f -name quarkpan | head -n1)"
-          if [ -z "$quarkpan_bin" ]; then
-            echo "quarkpan binary not found after extraction" >&2
-            exit 1
-          fi
-          chmod +x "$quarkpan_bin"
-          echo "Using quarkpan at: $quarkpan_bin"
-          "$quarkpan_bin" --version || true
-          echo "QUARKPAN_BIN=$quarkpan_bin" >> "$GITHUB_ENV"
-
-      - name: Upload release files to Quark netdisk
-        if: ${{ env.QUARK_COOKIE != '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # quarkpan reads QUARK_COOKIE from the environment via clap's env attribute.
-          echo "Uploading pms/${RELEASE_VERSION}/ to Quark netdisk (root → pms/${RELEASE_VERSION})"
-          "$QUARKPAN_BIN" upload-dir --dir pms --pdir-fid 0 -c -o
-          echo "Quark netdisk upload completed."
-
       - name: Set up uv
-        if: ${{ env.HF_TOKEN != '' || env.MODELSCOPE_API_TOKEN != '' }}
+        id: setup_mirror_uploads
+        if: ${{ !cancelled() && steps.stage_mirrors.outcome == 'success' && steps.publish_release.outcome == 'success' && (env.HF_TOKEN != '' || env.MODELSCOPE_API_TOKEN != '') }}
         uses: astral-sh/setup-uv@v6
 
       - name: Upload release files to HuggingFace dataset
-        if: ${{ env.HF_TOKEN != '' }}
+        if: ${{ !cancelled() && steps.setup_mirror_uploads.outcome == 'success' && env.HF_TOKEN != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -366,7 +334,7 @@ jobs:
           echo "HuggingFace dataset upload completed."
 
       - name: Upload release files to ModelScope dataset
-        if: ${{ env.MODELSCOPE_API_TOKEN != '' }}
+        if: ${{ !cancelled() && steps.setup_mirror_uploads.outcome == 'success' && env.MODELSCOPE_API_TOKEN != '' }}
         shell: bash
         run: |
           set -euo pipefail

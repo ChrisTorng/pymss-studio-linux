@@ -171,6 +171,7 @@ export const useAppStore = defineStore('app', () => {
   const runtimeCoreUpdateMode = ref<RuntimeCoreMode>('update')
   const runtimeCoreUpdateStage = ref('')
   const corePlanWaiters = new Map<string, { resolve: (plan: RuntimeCorePlan) => void; reject: (error: Error) => void }>()
+  let preparedRuntimeCorePlanId: string | null = null
   const runtimeEnvSizes = ref<Record<string, number>>({})
   const runtimeEnvSizesLoading = ref(false)
   const runtimeEnvSizesError = ref('')
@@ -364,11 +365,13 @@ export const useAppStore = defineStore('app', () => {
   const runtimeInfoCache = createRuntimeReadCache<RuntimeInfo>(2 * 60_000)
   const runtimeSizesCache = createRuntimeReadCache<Record<string, number>>(10 * 60_000)
   const runtimeVersionsCache = createRuntimeReadCache<RuntimeCoreVersions | null>(15 * 60_000)
+  let runtimeVersionsRequest = 0
 
   function invalidateRuntimeReads() {
     runtimeInfoCache.invalidate()
     runtimeSizesCache.invalidate()
     runtimeVersionsCache.invalidate()
+    runtimeVersionsRequest += 1
   }
 
   type RuntimeBackgroundOperation = {
@@ -540,7 +543,6 @@ export const useAppStore = defineStore('app', () => {
 
   const ensureRuntimeInfo = () => runtimeInfoCache.read(() => queryRuntimeInfo())
   let runtimeVersionsWaiting = 0
-  let runtimeVersionsRequest = 0
 
   async function queryRuntimeCoreVersions() {
     const request = ++runtimeVersionsRequest
@@ -610,6 +612,7 @@ export const useAppStore = defineStore('app', () => {
     target: { pythonPath?: string; repairDependencies?: boolean; planId?: string; mode?: RuntimeCoreMode; prepareOnly?: boolean } = {},
   ) {
     if (!runtimeCoreUpdateSupported.value) throw new Error('Runtime core updates are unavailable on this platform.')
+    preparedRuntimeCorePlanId = null
     const taskId = `runtime_core_update_${crypto.randomUUID()}`
     runtimeCoreUpdateTaskId.value = taskId
     runtimeCoreUpdateStatus.value = 'updating'
@@ -639,6 +642,7 @@ export const useAppStore = defineStore('app', () => {
       corePlanWaiters.delete(taskId)
       throw new Error('Runtime core updates are unavailable on this platform.')
     }
+    preparedRuntimeCorePlanId = null
     runtimeCoreUpdateTaskId.value = taskId
     runtimeCoreUpdateStatus.value = 'preparing'
     runtimeCoreUpdateMode.value = target.mode
@@ -654,6 +658,13 @@ export const useAppStore = defineStore('app', () => {
       rejectPlan(error instanceof Error ? error : new Error(String(error)))
     })
     return completion
+  }
+
+  function discardRuntimeCorePlan(planId: string) {
+    if (runtimeCoreUpdateStatus.value !== 'prepared' || preparedRuntimeCorePlanId !== planId) return false
+    preparedRuntimeCorePlanId = null
+    runtimeCoreUpdateStatus.value = 'idle'
+    return true
   }
 
   async function activateRuntime(
@@ -753,6 +764,7 @@ export const useAppStore = defineStore('app', () => {
     if (runtimeCoreUpdateTaskId.value && taskId === runtimeCoreUpdateTaskId.value) {
       const waiter = corePlanWaiters.get(taskId)
       if (event?.type === 'runtime_core_update_plan') {
+        preparedRuntimeCorePlanId = (event.payload as RuntimeCorePlan).id
         runtimeCoreUpdateStatus.value = 'prepared'
         runtimeCoreUpdateTaskId.value = null
         runtimeCoreUpdateMessage.value = ''
@@ -760,6 +772,8 @@ export const useAppStore = defineStore('app', () => {
         corePlanWaiters.delete(taskId)
         waiter?.resolve(event.payload as RuntimeCorePlan)
       } else if (event?.type === 'runtime_core_update_finished') {
+        invalidateRuntimeReads()
+        runtimeCoreVersions.value = null
         runtimeCoreUpdateStatus.value = 'success'
         runtimeCoreUpdateMessage.value = ''
         runtimeCoreUpdateTaskId.value = null
@@ -779,9 +793,12 @@ export const useAppStore = defineStore('app', () => {
             logPath: event.payload?.logPath,
           }
         }
-        void checkEnv()
-        void checkRuntimeInfo()
-        void loadRuntimeCoreVersions()
+        void checkEnv().catch((error) => {
+          console.warn('Failed to refresh environment details after a core update', error)
+        })
+        void checkRuntimeInfo().then(() => loadRuntimeCoreVersions()).catch((error) => {
+          console.warn('Failed to refresh runtime versions after a core update', error)
+        })
         void import('@/stores/model').then(({ useModelStore }) => useModelStore().loadModels()).catch((error) => {
           console.warn('Failed to refresh models after a runtime change', error)
         })
@@ -879,6 +896,7 @@ export const useAppStore = defineStore('app', () => {
     runtimeCoreUpdateMode,
     runtimeCoreUpdateStage,
     prepareRuntimeCoreUpdate,
+    discardRuntimeCorePlan,
     runtimeEnvSizes,
     runtimeEnvSizesLoading,
     runtimeEnvSizesError,

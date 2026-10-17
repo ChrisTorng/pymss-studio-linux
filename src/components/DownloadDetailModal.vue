@@ -296,7 +296,7 @@ function handleClose() {
           </div>
           <div
             ref="logContainerRef"
-            class="ddm-logs"
+            class="ddm-logs console-scrollbar"
             :class="{ 'ddm-logs--empty': !logs.length }"
             @scroll="onScroll"
           >
@@ -556,12 +556,9 @@ function handleClose() {
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.55;
-  scrollbar-width: thin;
-  scrollbar-color: #73839c transparent;
 }
 
 @supports selector(::-webkit-scrollbar) {
-  .ddm-logs { scrollbar-width: auto; scrollbar-color: auto; }
   .download-detail-modal :deep(.n-card-content) { scrollbar-width: auto; scrollbar-color: auto; }
 }
 .download-detail-modal :deep(.n-card-content::-webkit-scrollbar),
@@ -572,13 +569,6 @@ function handleClose() {
 .ddm-error-text::-webkit-scrollbar-thumb { border-radius: 999px; background: color-mix(in srgb, var(--on-surface-muted) 40%, transparent); }
 .download-detail-modal :deep(.n-card-content::-webkit-scrollbar-button),
 .ddm-error-text::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
-.ddm-logs::-webkit-scrollbar { width: 9px; }
-.ddm-logs::-webkit-scrollbar-track { background: transparent; }
-.ddm-logs::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: rgb(148 163 184 / 45%) padding-box; }
-.ddm-logs::-webkit-scrollbar-thumb:hover { background: rgb(148 163 184 / 65%) padding-box; }
-.ddm-logs::-webkit-scrollbar-button,
-.ddm-logs::-webkit-scrollbar-corner { display: none; width: 0; height: 0; }
-
 .ddm-logs-empty {
   color: var(--on-surface-muted);
   text-align: center;

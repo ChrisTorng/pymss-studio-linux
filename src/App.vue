@@ -72,6 +72,8 @@ const runtimeManifestSyncRequired = computed(() => runtimeCoreSyncAvailable(
   app.runtimeInfo?.manifestVersion,
 ))
 const runtimeCoreUpdateAvailable = computed(() => app.runtimeCoreUpdateSupported && (runtimeVersionUpdateAvailable.value || runtimeManifestSyncRequired.value))
+const runtimeCorePromptBlocked = computed(() => app.runtimeInfoLoading || app.runtimeCoreVersionsLoading
+  || ['preparing', 'prepared', 'updating'].includes(app.runtimeCoreUpdateStatus))
 const runtimeCorePromptContent = computed(() => t(
   runtimeManifestSyncRequired.value
     ? 'settings.runtimeCoreStartupSyncPrompt'
@@ -182,8 +184,11 @@ async function openManualUpdate() {
 }
 
 function showRuntimeCorePrompt() {
-  if (!app.runtimeCoreUpdateSupported) return
-  if (runtimeCorePromptShown.value || !bootReady.value || showStartupOnboarding.value || isStandaloneRoute.value || !runtimeCoreUpdateAvailable.value) return
+  if (!app.runtimeCoreUpdateSupported || runtimeCorePromptBlocked.value || !runtimeCoreUpdateAvailable.value || isStandaloneRoute.value) {
+    runtimeCorePromptVisible.value = false
+    return
+  }
+  if (runtimeCorePromptShown.value || !bootReady.value || showStartupOnboarding.value) return
   runtimeCorePromptShown.value = true
   runtimeCorePromptVisible.value = true
 }
@@ -295,11 +300,7 @@ watch([bootReady, () => updates.requiresManualInstall, () => updates.latestVersi
   showManualUpdatePrompt()
 }, { immediate: true })
 
-watch([bootReady, showStartupOnboarding, isStandaloneRoute, runtimeCoreUpdateAvailable], () => {
-  if (isStandaloneRoute.value) {
-    runtimeCorePromptVisible.value = false
-    return
-  }
+watch([bootReady, showStartupOnboarding, isStandaloneRoute, runtimeCoreUpdateAvailable, runtimeCorePromptBlocked], () => {
   showRuntimeCorePrompt()
 }, { immediate: true })
 
@@ -446,7 +447,7 @@ const themeOverrides = computed(() => {
                 <strong>{{ t('settings.updateDownloadLogs') }}</strong>
                 <span>{{ t('settings.updateDownloadLogHint') }}</span>
               </div>
-              <div class="update-install-panel__log-list">
+              <div class="update-install-panel__log-list console-scrollbar">
                 <div v-for="(entry, index) in updates.downloadLogs" :key="`${entry.at}-${index}`" class="update-install-panel__log-line">
                   <time>{{ entry.at }}</time>
                   <span>{{ entry.message }}</span>

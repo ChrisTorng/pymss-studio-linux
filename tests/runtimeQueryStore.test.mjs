@@ -938,6 +938,7 @@ test('runtime env-size scan prevents a queued write from starting', async () => 
 test('core-update ACK returns before its terminal success, then refreshes without self-locking', async () => {
   const calls = []
   const refreshed = deferred()
+  const versionsRefreshed = deferred()
   let infoCalls = 0
   const app = appStore(async command => {
     calls.push(command)
@@ -946,7 +947,8 @@ test('core-update ACK returns before its terminal success, then refreshes withou
       if (++infoCalls === 2) refreshed.resolve()
       return { ready: true }
     }
-    if (command === 'runtime_core_versions' || command === 'get_env_info') return {}
+    if (command === 'runtime_core_versions') { versionsRefreshed.resolve(); return {} }
+    if (command === 'get_env_info') return {}
     throw new Error(`unexpected ${command}`)
   })
 
@@ -957,6 +959,7 @@ test('core-update ACK returns before its terminal success, then refreshes withou
   app.handleRuntimeEvent({ type: 'runtime_core_update_finished', taskId, payload: {} })
   await within(blockedQuery, 'query after core update success')
   await within(refreshed.promise, 'automatic post-update runtime refresh')
+  await within(versionsRefreshed.promise, 'version discovery after runtime refresh')
   assert.equal(app.runtimeCoreUpdateTaskId, null)
   assert.ok(calls.filter(command => command === 'runtime_info').length >= 2)
   assert.ok(calls.includes('runtime_core_versions'))
@@ -968,6 +971,81 @@ const preparedCorePlan = {
   currentVersions: { pymss: '2.1.8', 'pymss-core': '0.1.11' },
   targetVersions: { pymss: '2.1.9', 'pymss-core': '0.1.11' }, dependencyCount: 0,
 }
+
+test('discarding a prepared plan releases prepared state without starting an installation', async () => {
+  const calls = []
+  const app = appStore(async command => { calls.push(command); return true })
+  const pending = app.prepareRuntimeCoreUpdate('cpu', 'pypi', '', { mode: 'repair' })
+  app.handleRuntimeEvent({ type: 'runtime_core_update_plan', taskId: app.runtimeCoreUpdateTaskId, payload: preparedCorePlan })
+  const plan = await pending
+  assert.equal(app.runtimeCoreUpdateStatus, 'prepared')
+  assert.equal(app.discardRuntimeCorePlan(plan.id), true)
+  assert.equal(app.runtimeCoreUpdateStatus, 'idle')
+  assert.equal(app.discardRuntimeCorePlan(plan.id), false)
+  await app.checkRuntimeInfo()
+  assert.equal(calls.filter(command => command === 'start_runtime_core_update').length, 1)
+  app.$dispose()
+})
+
+test('discarding an old plan cannot clear a newer prepared plan or an active application', async () => {
+  const app = appStore(async command => {
+    if (command === 'runtime_info') return { platform: 'win32', ready: true }
+    return true
+  })
+  const first = app.prepareRuntimeCoreUpdate('cpu', 'pypi', '', { mode: 'repair' })
+  app.handleRuntimeEvent({ type: 'runtime_core_update_plan', taskId: app.runtimeCoreUpdateTaskId, payload: preparedCorePlan })
+  await first
+  const nextPlan = { ...preparedCorePlan, id: 'abcdef0123456789abcdef0123456789' }
+  const second = app.prepareRuntimeCoreUpdate('cpu', 'pypi', '', { mode: 'repair' })
+  app.handleRuntimeEvent({ type: 'runtime_core_update_plan', taskId: app.runtimeCoreUpdateTaskId, payload: nextPlan })
+  await second
+  assert.equal(app.discardRuntimeCorePlan(preparedCorePlan.id), false)
+  assert.equal(app.runtimeCoreUpdateStatus, 'prepared')
+  const applyId = await app.updateRuntimeCore('cpu', 'pypi', '', { planId: nextPlan.id })
+  assert.equal(app.discardRuntimeCorePlan(nextPlan.id), false)
+  assert.equal(app.runtimeCoreUpdateStatus, 'updating')
+  app.handleRuntimeEvent({ type: 'task_cancelled', taskId: applyId })
+  await app.checkRuntimeInfo()
+  app.$dispose()
+})
+
+test('a core operation invalidates version comparisons that were already in flight', async () => {
+  const oldComparison = deferred()
+  const app = appStore(async command => {
+    if (command === 'runtime_core_versions') return oldComparison.promise
+    if (command === 'start_runtime_core_update') return true
+    if (command === 'runtime_info') return { platform: 'win32', ready: true }
+    throw new Error(`unexpected ${command}`)
+  })
+  app.runtimeInfo = { platform: 'win32', pymssVersion: '2.1.8' }
+  const old = app.loadRuntimeCoreVersions()
+  const taskId = await app.updateRuntimeCore('cuda')
+  oldComparison.resolve({ packages: { pymss: { currentVersion: '2.1.8', latestVersion: '2.1.9', updateAvailable: true } } })
+  await old
+  assert.equal(app.runtimeCoreVersions, null)
+  app.handleRuntimeEvent({ type: 'task_cancelled', taskId })
+  await app.checkRuntimeInfo()
+  app.$dispose()
+})
+
+test('post-update version discovery waits for the refreshed runtime snapshot', async () => {
+  const env = deferred()
+  const comparison = deferred()
+  const app = appStore(async (command, args) => {
+    if (command === 'start_runtime_core_update') return true
+    if (command === 'get_env_info') return env.promise
+    if (command === 'runtime_info') return { platform: 'win32', ready: true, pymssVersion: '2.1.9', pymssCoreVersion: '0.1.11' }
+    if (command === 'runtime_core_versions') { comparison.resolve(args.payload); return {} }
+    throw new Error(`unexpected ${command}`)
+  })
+  app.runtimeInfo = { platform: 'win32', pymssVersion: '2.1.8', pymssCoreVersion: '0.1.11' }
+  const taskId = await app.updateRuntimeCore('cuda')
+  app.handleRuntimeEvent({ type: 'runtime_core_update_finished', taskId, payload: {} })
+  env.resolve({ pymssVersion: '2.1.9' })
+  const payload = await within(comparison.promise, 'version comparison after refreshed runtime')
+  assert.equal(payload.versions.pymss, '2.1.9')
+  app.$dispose()
+})
 
 test('core planning releases the write queue for confirmation and apply forwards the confirmed plan', async () => {
   const calls = []
