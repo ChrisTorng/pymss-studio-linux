@@ -49,6 +49,7 @@ afterEach(async () => {
   Reflect.deleteProperty(globalThis, 'window')
   Reflect.deleteProperty(globalThis, 'localStorage')
   settings.outputDir = 'D:/DefaultOutput'
+  settings.maxConcurrentSeparations = 1
 })
 
 function storage(initial = {}) {
@@ -457,6 +458,164 @@ for (const mode of ['model', 'workflow']) {
     })
   }
 }
+
+for (const count of [0, 2]) {
+  test(`separation rejects a graph with ${count} inputs before creating tasks`, async () => {
+    storage()
+    const task = await newStore()
+    const definition = { nodes: [
+      ...Array.from({ length: count }, (_, index) => ({ id: index + 1, type: 'pymss_load_audio', widgets_values: ['input.wav', 'same'] })),
+      { id: 10, type: 'pymss_save_audio' },
+    ], links: [] }
+    await assert.rejects(task.startWorkflowInference({ ...workflow, definition }), {
+      message: count ? 'separate.workflowMultipleInputs' : 'separate.workflowNoInput',
+    })
+    assert.equal(task.tasks.length, 0)
+  })
+}
+
+test('multi-input graphs retain native execution through the workflow workbench', async () => {
+  storage()
+  const task = await newStore()
+  const definition = { nodes: [
+    { id: 1, type: 'pymss_load_audio', widgets_values: ['D:/first.wav', ''] },
+    { id: 2, type: 'pymss_load_audio', widgets_values: ['D:/second.wav', ''] },
+    { id: 3, type: 'pymss_save_audio' },
+  ], links: [] }
+  const result = await task.startWorkbenchInference({ ...workflow, definition }, {
+    inputs: {}, outputs: {}, primaryInput: '', outputLayout: 'flat', outputDirectory: 'D:/Output',
+  })
+  assert.equal(result.total, 1)
+  assert.equal(result.tasks[0].runConfig.workbench.nativeGraph, true)
+  assert.deepEqual(result.tasks[0].runConfig.workflowDefinition, definition)
+})
+
+test('retry cannot bypass the separation input restriction in older task snapshots', async () => {
+  storage()
+  const task = await newStore()
+  const queued = await task.startWorkflowInference(workflow)
+  const existing = task.tasks.find(item => item.id === queued.tasks[0].id)
+  existing.status = 'failed'
+  existing.runConfig.workflowDefinition = { nodes: [
+    { id: 1, type: 'input_audio' }, { id: 2, type: 'pymss_load_audio' },
+    { id: 3, type: 'pymss_save_audio' },
+  ], links: [] }
+  const count = task.tasks.length
+  await assert.rejects(task.retryTask(existing.id), { message: 'separate.workflowMultipleInputs' })
+  assert.equal(task.tasks.length, count)
+})
+
+function queuedWorkflowSnapshots(count, inputCounts, workbench = false) {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `restored-${index}`, jobId: 'restored-workflow', model: 'Workflow',
+    input: `D:/Audio/${index}.wav`, jobOutput: 'D:/Outputs', output: `D:/Outputs/${index}`,
+    status: 'queued', createdAt: index + 1, updatedAt: index + 1, files: [], outputs: [], logs: [],
+    runConfig: {
+      runMode: 'workflow', workflowId: workflow.id, workflowName: workflow.name,
+      workflowDefinition: { nodes: [
+        ...Array.from({ length: inputCounts[index] }, (_, node) => ({ id: node + 1, type: 'pymss_load_audio' })),
+        { id: 10, type: 'pymss_save_audio' },
+      ], links: [] },
+      outputLayout: 'folders', device: 'cpu', outputFormat: 'wav', inferenceParams: {},
+      ...(workbench ? { workbench: { version: 1, nativeGraph: true } } : {}),
+    },
+  }))
+}
+
+async function resumeRestoredQueue(snapshots, concurrency = 1) {
+  storage({ 'task-history': { tasks: snapshots } })
+  const task = await newStore()
+  settings.maxConcurrentSeparations = concurrency
+  const calls = []
+  const startedIds = new Set()
+  window.__TAURI_INTERNALS__ = {
+    metadata: { currentWindow: { label: 'main' }, currentWebview: { label: 'main' } },
+    async invoke(command, args) {
+      if (command === 'start_workflow_inference' || command === 'start_separation') {
+        calls.push({ command, ...args.payload })
+        if (startedIds.has(args.payload.taskId)) throw new Error(`task already exists: ${args.payload.taskId}`)
+        startedIds.add(args.payload.taskId)
+      }
+      return { started: true }
+    },
+  }
+  task.scheduleQueue()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  return { task, calls }
+}
+
+async function restoreWorkflowQueue(count, inputCounts, workbench = false) {
+  return resumeRestoredQueue(queuedWorkflowSnapshots(count, inputCounts, workbench))
+}
+
+for (const count of [1, 2]) {
+  for (const inputs of [0, 2]) {
+    test(`restoring ${count} queued workflow task(s) rejects ${inputs} inputs before dispatch`, async () => {
+      const { task, calls } = await restoreWorkflowQueue(count, Array(count).fill(inputs))
+      assert.equal(calls.length, 0)
+      assert.equal(task.tasks.length, count)
+      assert.ok(task.tasks.every(item => item.status === 'failed'))
+      assert.ok(task.tasks.every(item => item.error === (inputs ? 'separate.workflowMultipleInputs' : 'separate.workflowNoInput')))
+    })
+  }
+
+  test(`restoring ${count} queued single-input task(s) still dispatches normally`, async () => {
+    const { task, calls } = await restoreWorkflowQueue(count, Array(count).fill(1))
+    assert.equal(calls.length, 1)
+    assert.equal(Boolean(calls[0].tasks), count > 1)
+    assert.ok(task.tasks.every(item => item.status === 'preparing'))
+  })
+
+  test(`restoring ${count} queued multi-input workbench task(s) preserves editor execution`, async () => {
+    const { task, calls } = await restoreWorkflowQueue(count, Array(count).fill(2), true)
+    assert.equal(calls.length, 1)
+    assert.ok(task.tasks.every(item => item.status === 'preparing'))
+  })
+}
+
+test('a restored workflow batch validates every task before starting the worker', async () => {
+  const { task, calls } = await restoreWorkflowQueue(2, [1, 2])
+  assert.equal(calls.length, 0)
+  assert.ok(task.tasks.every(item => item.status === 'failed' && item.error === 'separate.workflowMultipleInputs'))
+})
+
+function queuedBatch(id, inputCount, mode = 'workflow', createdAt = 1) {
+  return queuedWorkflowSnapshots(2, [inputCount, inputCount]).map((task, index) => ({
+    ...task, id: `${id}-${index}`, jobId: id, createdAt: createdAt + index,
+    runConfig: { ...task.runConfig, runMode: mode },
+  }))
+}
+
+for (const mode of ['workflow', 'model']) {
+  test(`a rejected batch cannot resubmit the following ${mode} batch during concurrent scheduling`, async () => {
+    const { task, calls } = await resumeRestoredQueue([
+      ...queuedBatch('invalid', 2), ...queuedBatch('valid', 1, mode, 10),
+    ], 2)
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].command, mode === 'workflow' ? 'start_workflow_inference' : 'start_separation')
+    assert.equal(calls[0].taskId, 'valid-0')
+    assert.ok(task.tasks.filter(item => item.jobId === 'invalid').every(item => item.status === 'failed'))
+    assert.ok(task.tasks.filter(item => item.jobId === 'valid').every(item => item.status === 'preparing' && !item.error))
+  })
+}
+
+test('rejected batches free Worker slots without duplicate starts or starving later jobs', async () => {
+  const invalid = Array.from({ length: 25 }, (_, index) => queuedBatch(`invalid-${index}`, 2, 'workflow', index * 2 + 1)).flat()
+  const { task, calls } = await resumeRestoredQueue([
+    ...invalid, ...queuedBatch('first', 1, 'workflow', 100),
+    ...queuedBatch('second', 1, 'model', 110), ...queuedBatch('third', 1, 'workflow', 120),
+  ], 2)
+  assert.deepEqual(calls.map(call => call.taskId), ['first-0', 'second-0'])
+  assert.ok(task.tasks.filter(item => item.jobId.startsWith('invalid-')).every(item => item.status === 'failed'))
+  assert.ok(task.tasks.filter(item => item.jobId === 'third').every(item => item.status === 'queued'))
+  task.scheduleQueue()
+  assert.equal(calls.length, 2)
+  for (const id of ['first-0', 'first-1']) {
+    task.handleWorkerEvent({ type: 'task_done', taskId: id, payload: { outputDir: 'D:/Outputs', files: [], outputs: [] } })
+  }
+  assert.deepEqual(calls.map(call => call.taskId), ['first-0', 'second-0', 'third-0'])
+  assert.ok(task.tasks.filter(item => item.jobId === 'third').every(item => item.status === 'preparing'))
+})
 
 for (const platform of ['linux', 'darwin']) {
   test(`${platform} output selection preserves significant trailing spaces in native directories`, async () => {

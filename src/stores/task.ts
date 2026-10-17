@@ -27,6 +27,7 @@ import {
 import { normalizeStemOutputs, stemFromOutputPath, type StemOutput } from '@/utils/stemOutputs'
 import { normalizeConcurrentSeparations } from '@/features/tasks/concurrency'
 import { isMainTaskOwner } from '@/utils/taskOwner'
+import { getSeparateWorkflowInputIssue } from '@/utils/workflowInputs'
 import { cloneWorkflow, prepareWorkbenchRun, workflowInputNodes, type WorkflowRuntimeBindings, type WorkflowWorkbenchSnapshot, type WorkflowNodeState } from '@/workflows/workbench'
 import { SEPARATE_MODEL_PAGE_SIZES, normalizePageSize } from '@/utils/pagination'
 
@@ -1208,8 +1209,7 @@ export const useTaskStore = defineStore('task', () => {
     setTaskStatus(task.id, 'preparing', 'Preparing task')
     try {
       if (config.runMode === 'workflow') {
-        const validationError = workflowDefinitionValidationError(config.workflowDefinition || {})
-        if (validationError) throw new Error(validationError)
+        validateWorkflowRunConfig(config)
         await invoke<{ taskId: string; started: boolean }>('start_workflow_inference', {
           payload: {
             taskId: task.id,
@@ -1273,7 +1273,7 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   async function startBatchWorker(batchTasks: SeparationTask[]) {
-    if (!batchTasks.length) return false
+    if (!batchTasks.length || batchTasks.some(task => task.status !== 'queued')) return false
     rememberSessionTasks(batchTasks)
     const settings = useSettingsStore()
     const primary = batchTasks[0]
@@ -1330,7 +1330,7 @@ export const useTaskStore = defineStore('task', () => {
   }
 
   async function startWorkflowBatchWorker(batchTasks: SeparationTask[]) {
-    if (!batchTasks.length) return false
+    if (!batchTasks.length || batchTasks.some(task => task.status !== 'queued')) return false
     rememberSessionTasks(batchTasks)
     const settings = useSettingsStore()
     const primary = batchTasks[0]
@@ -1339,6 +1339,7 @@ export const useTaskStore = defineStore('task', () => {
       setTaskStatus(task.id, 'preparing', 'Preparing workflow batch task')
     })
     try {
+      for (const task of batchTasks) validateWorkflowRunConfig(task.runConfig || config)
       await invoke<{ taskId: string; started: boolean }>('start_workflow_inference', {
         payload: {
           taskId: primary.id,
@@ -1384,23 +1385,39 @@ export const useTaskStore = defineStore('task', () => {
     }
   }
 
+  let schedulingQueue = false
+  let queueScheduleRequested = false
+
   function scheduleQueue() {
     // Browser-only previews cannot start a Rust worker. Keep restored queue items
     // intact until the desktop runtime is available instead of failing them on boot.
     if (!isTauriRuntime()) return
     if (!isMainTaskOwner()) return
-    const nextJobs = selectQueuedJobGroups(tasks.value, maxConcurrentSeparations())
-    nextJobs.forEach((jobTasks) => {
-      if (jobTasks.length === 1) {
-        void startQueuedTask(jobTasks[0].id)
-        return
-      }
-      if (jobTasks[0].runConfig?.runMode === 'workflow') {
-        void startWorkflowBatchWorker(jobTasks)
-      } else {
-        void startBatchWorker(jobTasks)
-      }
-    })
+    if (schedulingQueue) {
+      queueScheduleRequested = true
+      return
+    }
+    schedulingQueue = true
+    try {
+      do {
+        queueScheduleRequested = false
+        const nextJobs = selectQueuedJobGroups(tasks.value, maxConcurrentSeparations())
+        nextJobs.forEach((jobTasks) => {
+          if (jobTasks.length === 1) {
+            void startQueuedTask(jobTasks[0].id)
+            return
+          }
+          if (jobTasks[0].runConfig?.runMode === 'workflow') {
+            void startWorkflowBatchWorker(jobTasks)
+          } else {
+            void startBatchWorker(jobTasks)
+          }
+        })
+        // Synchronous validation failures request another pass after the current selection is consumed.
+      } while (queueScheduleRequested)
+    } finally {
+      schedulingQueue = false
+    }
   }
 
   function setTaskStatus(id: string, status: TaskStatus, message?: string, progress?: number) {
@@ -2176,12 +2193,28 @@ export const useTaskStore = defineStore('task', () => {
     return ''
   }
 
+  function validateSeparateWorkflowInput(definition: Record<string, unknown>) {
+    const issue = getSeparateWorkflowInputIssue(definition)
+    if (issue) throw new Error(i18n.global.t(
+      issue.code === 'multiple-inputs' ? 'separate.workflowMultipleInputs' : 'separate.workflowNoInput',
+      { count: issue.count },
+    ))
+  }
+
+  function validateWorkflowRunConfig(config: SeparationRunConfig) {
+    const definition = config.workflowDefinition || {}
+    const validationError = workflowDefinitionValidationError(definition)
+    if (validationError) throw new Error(validationError)
+    if (!config.workbench) validateSeparateWorkflowInput(definition)
+  }
+
   async function startWorkflowInference(workflow: WorkflowEntry, options: { outputDir?: string; outputLayout?: OutputLayout; outputNaming?: OutputNamingConfig } = {}) {
     if (!workflow?.id) {
       throw new Error('Workflow is required')
     }
     const validationError = workflowDefinitionValidationError(workflow.definition)
     if (validationError) throw new Error(validationError)
+    validateSeparateWorkflowInput(workflow.definition)
     const targets = [...inputFiles.value]
     if (!targets.length) {
       throw new Error(i18n.global.t('separate.startHintNoInput'))
@@ -2266,6 +2299,7 @@ export const useTaskStore = defineStore('task', () => {
       }
     }
     if (existing.runConfig?.runMode === 'workflow' && existing.runConfig.workflowId && existing.runConfig.workflowName && existing.runConfig.workflowDefinition) {
+      validateSeparateWorkflowInput(existing.runConfig.workflowDefinition)
       const task = createQueuedWorkflowTask(existing.input, {
         id: existing.runConfig.workflowId,
         name: existing.runConfig.workflowName,

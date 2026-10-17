@@ -42,6 +42,7 @@ import { useModelStore, type ModelDefaultInferenceParams, type ModelEntry } from
 import { useAppStore } from '@/stores/app'
 import { buildModelCategoryOptionsFromModels, getModelCategoryLabel } from '@/utils/modelCategory'
 import { matchesModelQuery } from '@/utils/modelSearch'
+import { getSeparateWorkflowInputIssue } from '@/utils/workflowInputs'
 import { sortStemOutputsByOrder } from '@/utils/stemOrder'
 import { retainAvailableModelNames } from '@/utils/modelSource'
 import { SEPARATE_MODEL_PAGE_SIZES } from '@/utils/pagination'
@@ -122,8 +123,7 @@ const workflowMetaEditor = ref<WorkflowEntry | null>(null)
 const workflowNameDraft = ref('')
 const workflowNoteDraft = ref('')
 const workflowMetaSaving = ref(false)
-runMode.value = 'model'
-if (route.query.mode === 'workflow') void router.replace('/workflows')
+if (route.query.mode === 'workflow') runMode.value = 'workflow'
 const focusedSeparationJobId = ref<string | null>(null)
 const composingNewJob = ref(false)
 const submittingJob = ref(false)
@@ -483,6 +483,11 @@ function workflowDefinitionError(definition: Record<string, unknown>): string {
   if (issue === 'no-save-outputs') return t('workflows.workflowNoSaveOutputs')
   if (issue === 'invalid-definition') return t('workflows.workflowFormatInvalid')
   if (issue === 'invalid-format') return t('workflows.workflowFormatInvalid')
+  const inputIssue = getSeparateWorkflowInputIssue(definition)
+  if (inputIssue) return t(
+    inputIssue.code === 'multiple-inputs' ? 'separate.workflowMultipleInputs' : 'separate.workflowNoInput',
+    { count: inputIssue.count },
+  )
   return ''
 }
 
@@ -508,6 +513,15 @@ const contextMenuOptions = computed<DropdownOption[]>(() => {
 function selectRunnableWorkflow(item: WorkflowEntry) {
   if (workflowIssue(item)) return
   workflow.selectWorkflow(item.id)
+}
+
+function workflowIssueSummary(item: WorkflowEntry): string {
+  const inputIssue = getSeparateWorkflowInputIssue(item.definition)
+  if (inputIssue && !getWorkflowDefinitionIssue(item.definition)) return t(
+    inputIssue.code === 'multiple-inputs' ? 'separate.workflowMultipleInputsSummary' : 'separate.workflowNoInputSummary',
+    { count: inputIssue.count },
+  )
+  return workflowIssue(item)
 }
 
 function openSeparateContextMenu(
@@ -632,12 +646,12 @@ function workflowValidationError() {
 }
 const workflowStructureInvalid = computed(() => runMode.value === 'workflow' && Boolean(workflowValidationError()))
 const startStatusText = computed(() => {
+  const validationError = workflowValidationError()
+  if (validationError) return validationError
   if (runMode.value === 'workflow' && workflows.value.length && !runnableWorkflows.value.length) {
     return t('separate.startHintNoRunnableWorkflow')
   }
   if (runMode.value === 'workflow' && !selectedWorkflow.value) return t('separate.startHintNoWorkflow')
-  const validationError = workflowValidationError()
-  if (validationError) return validationError
   if (outputDirectoryError.value) return outputDirectoryError.value
   if (!inputFiles.value.length) return t('separate.outputDirectorySummary')
   if (runMode.value === 'model' && ensembleEnabled.value && !ensembleReady.value) return t('separate.ensembleNotReady')
@@ -1824,7 +1838,9 @@ async function start() {
   }
   submittingJob.value = true
   try {
-    const result = ensembleEnabled.value
+    const result = runMode.value === 'workflow' && selectedWorkflow.value
+      ? await task.startWorkflowInference(selectedWorkflow.value, { outputDir: normalizedOutputDir.value, outputLayout: effectiveOutputLayout.value })
+      : ensembleEnabled.value
         ? await task.startWorkflowInference(buildEnsembleWorkflow(), { outputDir: normalizedOutputDir.value, outputLayout: effectiveOutputLayout.value, outputNaming: outputNamingConfig.value })
         : await task.startSeparation({ outputDir: normalizedOutputDir.value, outputLayout: effectiveOutputLayout.value, outputNaming: outputNamingConfig.value })
     focusedSeparationJobId.value = result?.jobId || newestRunningJob.value?.id || focusedSeparationJobId.value
@@ -2013,8 +2029,21 @@ async function retryCurrentTask() {
         </div>
       </div>
       <div class="console-topbar__controls">
-        <n-button text class="console-topbar__manage" @click="router.push('/models')">
-          {{ t('separate.manageModelsInline') }}
+        <n-radio-group
+          v-model:value="runMode"
+          class="mode-switch"
+          :disabled="isRunModeLocked"
+        >
+          <n-radio-button
+            v-for="option in runModeOptions"
+            :key="option.value"
+            :value="option.value"
+          >
+            {{ option.label }}
+          </n-radio-button>
+        </n-radio-group>
+        <n-button text class="console-topbar__manage" @click="router.push(runMode === 'workflow' ? '/workflows' : '/models')">
+          {{ runMode === 'workflow' ? t('separate.manageWorkflowsInline') : t('separate.manageModelsInline') }}
         </n-button>
       </div>
     </header>
@@ -2526,6 +2555,60 @@ async function retryCurrentTask() {
                 </div>
               </div>
 
+              <div v-else key="workflow" class="target-pane">
+                <div class="target-toolbar target-toolbar--single">
+                  <n-input
+                    v-model:value="workflowSearch"
+                    clearable
+                    :placeholder="t('separate.workflowSearchPlaceholder')"
+                  >
+                    <template #prefix><n-icon :component="SearchOutline" /></template>
+                  </n-input>
+                </div>
+                <div v-if="filteredWorkflows.length" class="target-list" role="listbox" :aria-label="t('separate.workflow')">
+                  <button
+                    v-for="item in filteredWorkflows"
+                    :key="item.id"
+                    type="button"
+                    role="option"
+                    :aria-selected="selectedWorkflowId === item.id"
+                    :aria-disabled="Boolean(workflowIssue(item))"
+                    :title="workflowIssue(item) || item.name"
+                    class="target-row workflow-target"
+                    :class="{
+                      'target-row--active': selectedWorkflowId === item.id,
+                      'target-row--unavailable': Boolean(workflowIssue(item)),
+                      'workflow-target--restricted': Boolean(getSeparateWorkflowInputIssue(item.definition)) && !getWorkflowDefinitionIssue(item.definition),
+                    }"
+                    @click="selectRunnableWorkflow(item)"
+                    @contextmenu.stop.prevent="openSeparateContextMenu($event, 'workflow', item)"
+                  >
+                    <span class="target-row__radio"></span>
+                    <span class="target-row__body">
+                      <span class="target-row__heading">
+                        <span class="target-row__name" :title="item.name">{{ item.name }}</span>
+                        <span v-if="workflowIssue(item)" class="target-row__unavailable">
+                          {{ t(getSeparateWorkflowInputIssue(item.definition) && !getWorkflowDefinitionIssue(item.definition)
+                            ? 'separate.workflowPageRequired' : 'separate.workflowUnavailable') }}
+                        </span>
+                      </span>
+                      <span class="target-row__meta">
+                        <span class="target-row__tag">{{ t('separate.workflow') }}</span>
+                        <span v-if="workflowIssue(item)" class="target-row__issue">{{ workflowIssueSummary(item) }}</span>
+                        <span v-else class="target-row__desc" :title="item.description">{{ item.description || t('separate.workflowNoDescription') }}</span>
+                      </span>
+                    </span>
+                  </button>
+                </div>
+                <div v-else class="stage-empty">
+                  <div class="stage-empty__glyph"><n-icon :component="GitNetworkOutline" /></div>
+                  <strong>{{ t('separate.workflowEmptyTitle') }}</strong>
+                  <p>{{ t('separate.workflowEmptyDesc') }}</p>
+                  <n-button secondary @click="router.push('/workflows')">
+                    {{ t('separate.workflowCreateAction') }}
+                  </n-button>
+                </div>
+              </div>
             </transition>
 
             <footer class="launch-bar" :class="`launch-bar--${canStart ? 'ready' : 'idle'}`">
@@ -2704,7 +2787,7 @@ async function retryCurrentTask() {
         @close="showSettingsDrawer = false"
       >
         <div class="settings-drawer__content">
-          <div class="settings-group">
+          <div v-if="runMode === 'model'" class="settings-group">
             <div class="settings-group__head">
               <strong>{{ t('separate.runOptionsTitle') }}</strong>
               <span>{{ t('separate.runOptionsHint') }}</span>
@@ -2717,22 +2800,23 @@ async function retryCurrentTask() {
           <div class="settings-group">
             <div class="settings-group__head">
               <strong>{{ t('separate.audioQualityTitle') }} · {{ formatLabel }}</strong>
-              <span>{{ t('separate.audioQualityEditable') }}</span>
+              <span>{{ t(runMode === 'workflow' && effectiveFormat !== 'm4a'
+                ? 'separate.workflowAudioQualityHint' : 'separate.audioQualityEditable') }}</span>
             </div>
-            <n-grid :cols="2" :x-gap="16" :y-gap="16" responsive="screen">
-              <n-grid-item v-if="effectiveFormat === 'wav'">
+            <n-grid v-if="runMode === 'model' || effectiveFormat === 'm4a'" :cols="2" :x-gap="16" :y-gap="16" responsive="screen">
+              <n-grid-item v-if="runMode === 'model' && effectiveFormat === 'wav'">
                 <div class="field-block">
                   <label>{{ t('audio.wavBitDepth') }}</label>
                   <n-select v-model:value="settings.wavBitDepth" :options="wavBitDepthOptions" />
                 </div>
               </n-grid-item>
-              <n-grid-item v-if="effectiveFormat === 'flac'">
+              <n-grid-item v-if="runMode === 'model' && effectiveFormat === 'flac'">
                 <div class="field-block">
                   <label>{{ t('audio.flacBitDepth') }}</label>
                   <n-select v-model:value="settings.flacBitDepth" :options="flacBitDepthOptions" />
                 </div>
               </n-grid-item>
-              <n-grid-item v-if="effectiveFormat === 'mp3'">
+              <n-grid-item v-if="runMode === 'model' && effectiveFormat === 'mp3'">
                 <div class="field-block">
                   <label>{{ t('audio.mp3BitRate') }}</label>
                   <n-select v-model:value="settings.mp3BitRate" :options="bitRateOptions" />
@@ -2750,7 +2834,7 @@ async function retryCurrentTask() {
                   <n-select v-model:value="settings.m4aCodec" :options="m4aCodecOptions" />
                 </div>
               </n-grid-item>
-              <n-grid-item v-if="runMode === 'workflow' || showNormalizeField">
+              <n-grid-item v-if="runMode === 'model' && showNormalizeField">
                 <div class="field-block field-block--inline-check">
                   <n-checkbox v-model:checked="normalize">{{ t('inference.normalize') }}</n-checkbox>
                 </div>
@@ -2758,7 +2842,7 @@ async function retryCurrentTask() {
             </n-grid>
           </div>
 
-          <div class="settings-group">
+          <div v-if="runMode === 'model'" class="settings-group">
             <n-collapse :default-expanded-names="[]">
               <n-collapse-item :title="t('inference.advancedParams')" name="inference">
                 <p class="advanced-hint">{{ t('separate.advancedPanelHint') }}</p>
@@ -2812,7 +2896,7 @@ async function retryCurrentTask() {
                   </n-grid-item>
                 </n-grid>
                 <div class="check-list check-list--spaced">
-                  <n-checkbox v-if="runMode === 'workflow' || showStandardizeField" v-model:checked="standardize">{{ t('inference.standardize') }}</n-checkbox>
+                  <n-checkbox v-if="showStandardizeField" v-model:checked="standardize">{{ t('inference.standardize') }}</n-checkbox>
                   <n-checkbox v-if="runMode === 'model' && hasInferenceField('enable_post_process')" v-model:checked="enable_post_process">{{ t('inference.vrEnablePostProcess') }}</n-checkbox>
                   <n-checkbox v-if="runMode === 'model' && hasInferenceField('high_end_process')" v-model:checked="high_end_process">{{ t('inference.vrHighEndProcess') }}</n-checkbox>
                 </div>
@@ -4110,6 +4194,18 @@ async function retryCurrentTask() {
   background: color-mix(in srgb, var(--surface-2) 34%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 24%, var(--outline));
 }
+
+.workflow-target { height: 68px; min-width: 0; }
+.workflow-target--restricted,
+.workflow-target--restricted:hover {
+  opacity: 1;
+  box-shadow: inset 0 0 0 1px var(--outline);
+}
+.workflow-target--restricted .target-row__unavailable {
+  color: var(--on-surface-muted);
+  background: var(--surface-2);
+}
+.workflow-target--restricted .target-row__issue { color: var(--on-surface-muted); }
 
 .target-row__radio {
   flex: 0 0 auto;
