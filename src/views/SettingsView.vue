@@ -60,6 +60,7 @@ import {
   HardwareChipOutline,
   CloudDownloadOutline,
   RefreshOutline,
+  ChevronForwardOutline,
 } from '@vicons/ionicons5'
 
 const { t, locale: currentLocale } = useI18n()
@@ -123,6 +124,7 @@ const {
   proxyUrl,
   proxyBypass,
   updateChannel,
+  updateSource,
 } = storeToRefs(settings)
 const { downloadTasks } = storeToRefs(modelStore)
 const { activeWorkerTasks } = storeToRefs(task)
@@ -817,6 +819,13 @@ const updateChannelOptions = computed(() => [
   { label: t('settings.updateChannelStable'), value: 'stable' },
   { label: t('settings.updateChannelPrerelease'), value: 'prerelease' },
 ])
+const updateSourceOptions = computed(() => [
+  { label: t('settings.updateSourceAuto'), value: 'auto' },
+  { label: 'GitHub', value: 'github' },
+  { label: t('settings.updateSourceModelscope'), value: 'modelscope' },
+])
+const updateSelectedSourceLabel = computed(() => updates.selectedSource === 'github' ? 'GitHub'
+  : updates.selectedSource === 'modelscope' ? t('settings.updateSourceModelscope') : t('settings.updateSourceCustom'))
 const aboutLinks = computed(() => [
   { label: t('settings.desktopRepository'), url: repoUrl, icon: LogoGithub },
   { label: t('settings.coreRepository'), url: coreRepoUrl, icon: LinkOutline },
@@ -858,6 +867,13 @@ async function changeUpdateChannel(value: 'stable' | 'prerelease') {
     if (!confirmed) return
   }
   updateChannel.value = value
+  updates.dismiss()
+  if (updateSupported.value) await checkForUpdates(true)
+}
+
+async function changeUpdateSource(value: 'auto' | 'github' | 'modelscope') {
+  if (value === updateSource.value || updates.isBusy) return
+  updateSource.value = value
   updates.dismiss()
   if (updateSupported.value) await checkForUpdates(true)
 }
@@ -1250,18 +1266,47 @@ onMounted(async () => {
                 <div v-if="updates.latestVersion" class="update-panel__meta">
                   <span>{{ t('settings.updateLastChecked', { time: updateLastCheckedLabel }) }}</span>
                   <span v-if="updateReleaseDateLabel">{{ t('settings.updateReleaseDate', { time: updateReleaseDateLabel }) }}</span>
+                  <span v-if="updates.selectedSource">{{ t('settings.updateSelectedSource', { source: updateSelectedSourceLabel }) }}</span>
                 </div>
 
                 <div class="update-panel__controls">
-                  <div class="update-panel__channel">
-                    <span>{{ t('settings.updateChannelLabel') }}</span>
-                    <n-select
-                      :value="updateChannel"
-                      :options="updateChannelOptions"
-                      :disabled="updates.isBusy"
-                      size="small"
-                      @update:value="changeUpdateChannel"
-                    />
+                  <div class="update-panel__preferences">
+                    <div class="update-panel__channel">
+                      <n-tooltip :show-arrow="false" style="max-width: 300px">
+                        <template #trigger>
+                          <span class="update-panel__field-label" tabindex="0">
+                            {{ t('settings.updateChannelLabel') }}
+                            <n-icon :component="InformationCircleOutline" size="13" />
+                          </span>
+                        </template>
+                        {{ updateChannel === 'prerelease' ? t('settings.updateChannelPrereleaseHint') : t('settings.updateChannelStableHint') }}
+                      </n-tooltip>
+                      <n-select
+                        :value="updateChannel"
+                        :options="updateChannelOptions"
+                        :disabled="updates.isBusy"
+                        size="small"
+                        @update:value="changeUpdateChannel"
+                      />
+                    </div>
+                    <div class="update-panel__channel">
+                      <n-tooltip :show-arrow="false" style="max-width: 300px">
+                        <template #trigger>
+                          <span class="update-panel__field-label" tabindex="0">
+                            {{ t('settings.updateSourceLabel') }}
+                            <n-icon :component="InformationCircleOutline" size="13" />
+                          </span>
+                        </template>
+                        {{ t('settings.updateSourceAutoHint') }}
+                      </n-tooltip>
+                      <n-select
+                        :value="updateSource"
+                        :options="updateSourceOptions"
+                        :disabled="updates.isBusy"
+                        size="small"
+                        @update:value="changeUpdateSource"
+                      />
+                    </div>
                   </div>
                   <div class="update-panel__actions">
                     <n-button
@@ -1279,7 +1324,7 @@ onMounted(async () => {
                       @click="openExternalUrl(updates.manualInstallUrl || repoUrl + '/releases/latest')"
                     >
                       <template #icon><n-icon :component="OpenOutline" /></template>
-                      {{ t('settings.updateOpenGitHub') }}
+                      {{ t('settings.updateOpenRelease') }}
                     </n-button>
                     <n-button
                       v-else-if="updates.hasUpdate"
@@ -1303,12 +1348,14 @@ onMounted(async () => {
                     </n-button>
                   </div>
                 </div>
-                <p class="update-panel__channel-hint">{{ updateChannel === 'prerelease' ? t('settings.updateChannelPrereleaseHint') : t('settings.updateChannelStableHint') }}</p>
-
-                <div v-if="updates.latestVersion && updates.releaseNotes" class="update-panel__release-notes">
-                  <span>{{ t('settings.updateReleaseNotesLabel') }}</span>
+                <details v-if="updates.latestVersion && updates.releaseNotes" class="update-panel__release-notes">
+                  <summary>
+                    <n-icon class="update-panel__notes-chevron" :component="ChevronForwardOutline" size="13" />
+                    <span>{{ t('settings.updateReleaseNotesLabel') }}</span>
+                    <span class="update-panel__notes-preview">{{ updates.releaseNotes.replace(/\s+/g, ' ') }}</span>
+                  </summary>
                   <p class="update-panel__notes">{{ updates.releaseNotes }}</p>
-                </div>
+                </details>
               </template>
             </div>
           </article>
@@ -2727,41 +2774,73 @@ onMounted(async () => {
 
 .update-panel__controls {
   display: flex;
-  align-items: flex-end;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 10px 16px;
   min-width: 0;
   padding-top: 12px;
   border-top: 1px solid color-mix(in srgb, var(--outline) 52%, transparent);
 }
 
+.update-panel__preferences {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 20px;
+  min-width: 0;
+}
+
 .update-panel__channel {
   display: grid;
-  grid-template-columns: auto minmax(180px, 1fr);
+  grid-template-columns: auto 150px;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   color: var(--on-surface-muted);
   font-size: 12px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .update-panel__channel .n-select {
-  width: min(100%, 320px);
+  width: 100%;
 }
 
-.update-panel__channel-hint {
-  margin: -4px 0 0;
-  color: var(--on-surface-muted);
-  font-size: 12px;
-  line-height: 1.5;
+.update-panel__field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
 }
 
-.update-panel__release-notes {
-  display: grid;
+.update-panel__field-label .n-icon { opacity: 0.65; }
+.update-panel__field-label:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+
+.update-panel__release-notes { min-width: 0; }
+
+.update-panel__release-notes summary {
+  display: flex;
+  align-items: center;
   gap: 6px;
+  min-width: 0;
+  cursor: pointer;
+  list-style: none;
 }
 
-.update-panel__release-notes > span {
+.update-panel__release-notes summary::-webkit-details-marker { display: none; }
+.update-panel__notes-chevron { flex: 0 0 auto; color: var(--on-surface-muted); }
+.update-panel__release-notes[open] .update-panel__notes-chevron { transform: rotate(90deg); }
+.update-panel__release-notes[open] .update-panel__notes-preview { visibility: hidden; }
+
+.update-panel__notes-preview {
+  flex: 1;
+  min-width: 0;
+  margin-left: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+}
+
+.update-panel__release-notes summary {
   color: var(--on-surface-muted);
   font-size: 12px;
   font-weight: 700;
@@ -2769,13 +2848,12 @@ onMounted(async () => {
 
 .update-panel__notes {
   margin: 0;
-  padding: 12px 14px;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--surface-2) 42%, transparent);
+  padding: 8px 0 0 19px;
   color: var(--on-surface);
   font-size: 12px;
   line-height: 1.65;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .update-panel__actions {
@@ -2810,8 +2888,10 @@ onMounted(async () => {
   }
 
   .update-panel__channel {
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr);
   }
+
+  .update-panel__preferences { display: grid; gap: 10px; }
 
   .update-panel__channel .n-select {
     width: 100%;

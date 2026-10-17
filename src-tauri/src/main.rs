@@ -11,6 +11,7 @@ mod state;
 mod storage;
 mod terminal;
 mod update_manager;
+mod update_sources;
 mod workflow_editors;
 
 use state::AppState;

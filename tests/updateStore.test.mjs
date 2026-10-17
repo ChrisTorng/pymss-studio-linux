@@ -22,9 +22,9 @@ const vite = await createServer({
         }`
       }
       if (path.endsWith('/src/stores/settings.ts')) {
-        return `export function useSettingsStore() {
-          return { developerMode: false, updateChannel: 'prerelease', updateEndpointOverride: '' }
-        }`
+        return `import { reactive } from 'vue'
+          export const settings = reactive({ developerMode: false, updateChannel: 'prerelease', updateSource: 'auto', updateEndpointOverride: '' })
+          export function useSettingsStore() { return settings }`
       }
       return null
     },
@@ -37,9 +37,11 @@ afterEach(() => {
 })
 
 const { useUpdateStore } = await vite.ssrLoadModule('/src/stores/update.ts')
+const { settings } = await vite.ssrLoadModule('/src/stores/settings.ts')
 const stores = []
 afterEach(() => {
   for (const store of stores.splice(0)) store.$dispose()
+  settings.updateSource = 'auto'
 })
 
 const persisted016 = {
@@ -72,12 +74,15 @@ function desktopStorage({ update = offeredUpdate, checkError, installError, load
   let payload = structuredClone(persisted016)
   const writes = []
   const commands = []
+  const argumentsList = []
+  let eventCallback
   globalThis.window = {
     __TAURI_INTERNALS__: {
       metadata: { currentWindow: { label: 'main' } },
-      transformCallback: () => 1,
+      transformCallback: callback => { eventCallback = callback; return 1 },
       invoke: async (command, args) => {
         commands.push(command)
+        argumentsList.push({ command, args })
         if (command === 'load_app_store') {
           assert.equal(args.name, 'update-state')
           if (loadError) throw loadError
@@ -95,7 +100,7 @@ function desktopStorage({ update = offeredUpdate, checkError, installError, load
           return 1
         }
         if (command === 'check_managed_update') {
-          assert.deepEqual(args, { channel: 'prerelease', endpointOverride: null })
+          assert.deepEqual(args, { channel: 'prerelease', endpointOverride: null, source: settings.updateSource })
           if (checkError) throw checkError
           return structuredClone(update)
         }
@@ -104,8 +109,44 @@ function desktopStorage({ update = offeredUpdate, checkError, installError, load
       },
     },
   }
-  return { writes, commands, payload: () => payload }
+  return { writes, commands, argumentsList, payload: () => payload, emit: payload => eventCallback({ event: 'pymss://managed-update-event', id: 1, payload }) }
 }
+
+for (const source of ['auto', 'github', 'modelscope']) {
+  test(`update checks and confirmed downloads retain the ${source} preference`, async () => {
+    settings.updateSource = source
+    const storage = desktopStorage({ update: { ...offeredUpdate, source: 'modelscope' }, installError: new Error('Download interrupted') })
+    const store = newStore()
+    await store.initialize()
+    await store.checkForUpdates(true)
+    assert.equal(store.selectedSource, 'modelscope')
+    await assert.rejects(store.downloadAndInstall(), /Download interrupted/)
+    assert.deepEqual(storage.argumentsList.find(call => call.command === 'start_managed_update').args, {
+      channel: 'prerelease', endpointOverride: null, expectedVersion: offeredUpdate.version, source,
+    })
+  })
+}
+
+test('switching download sources resets progress without losing the fallback log', async () => {
+  const storage = desktopStorage()
+  const store = newStore()
+  await store.initialize()
+  storage.emit({ event: 'SourceSelected', data: { source: 'github' } })
+  storage.emit({ event: 'Started', data: { contentLength: 1000 } })
+  storage.emit({ event: 'Progress', data: { downloadedBytes: 750, contentLength: 1000 } })
+  assert.equal(store.downloadDownloadedBytes, 750)
+  storage.emit({ event: 'SourceSelected', data: { source: 'modelscope', fallback: true } })
+  assert.equal(store.selectedSource, 'modelscope')
+  assert.equal(store.status, 'downloading')
+  assert.equal(store.downloadDownloadedBytes, 0)
+  assert.equal(store.downloadTotalBytes, 0)
+  assert.ok(store.downloadLogs.some(entry => entry.message === 'Retrying download from ModelScope'))
+  storage.emit({ event: 'Started', data: { contentLength: 1000 } })
+  storage.emit({ event: 'Progress', data: { downloadedBytes: 100, contentLength: 1000 } })
+  assert.equal(store.downloadDownloadedBytes, 100)
+  store.dismiss()
+  assert.equal(store.selectedSource, undefined)
+})
 
 test('browser update preferences written by 0.0.16 load without a rewrite', async () => {
   const storage = browserStorage()

@@ -137,8 +137,9 @@ pub async fn check_managed_update(
     app: AppHandle,
     channel: update_manager::UpdateChannel,
     endpoint_override: Option<String>,
+    source: Option<update_manager::UpdateSource>,
 ) -> AppResult<Option<update_manager::ManagedUpdateInfo>> {
-    update_manager::check(&app, channel, endpoint_override).await
+    update_manager::check(&app, channel, endpoint_override, source.unwrap_or_default()).await
 }
 
 #[tauri::command]
@@ -147,8 +148,9 @@ pub async fn start_managed_update(
     channel: update_manager::UpdateChannel,
     endpoint_override: Option<String>,
     expected_version: String,
+    source: Option<update_manager::UpdateSource>,
 ) -> AppResult<()> {
-    update_manager::start(&app, channel, endpoint_override, expected_version).await
+    update_manager::start(&app, channel, endpoint_override, expected_version, source.unwrap_or_default()).await
 }
 
 #[tauri::command]

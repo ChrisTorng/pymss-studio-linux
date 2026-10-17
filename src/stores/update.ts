@@ -27,9 +27,11 @@ type ManagedUpdate = {
   requiresManualInstall: boolean
   updateMessage?: string
   manualInstallUrl?: string
+  source?: 'github' | 'modelscope' | 'custom'
 }
 
 type UpdateDownloadEvent =
+  | { event: 'SourceSelected'; data: { source: 'github' | 'modelscope' | 'custom'; fallback?: boolean } }
   | { event: 'Started'; data: { contentLength?: number | null } }
   | { event: 'Progress'; data: { chunkLength?: number; downloadedBytes?: number; contentLength?: number | null; speedBytesPerSecond?: number } }
   | { event: 'Finished'; data?: null }
@@ -51,6 +53,7 @@ export const useUpdateStore = defineStore('update', () => {
   const releaseDate = ref('')
   const updateMessage = ref('')
   const manualInstallUrl = ref('')
+  const selectedSource = ref<ManagedUpdate['source']>()
   const error = ref('')
   const lastCheckedAt = ref('')
   const availableUpdate = ref<ManagedUpdate | null>(null)
@@ -127,6 +130,19 @@ export const useUpdateStore = defineStore('update', () => {
         lastAcceptedVersion.value = String(payload?.lastAcceptedVersion || '')
         if (isTauriRuntime()) {
           const nextUnlisten = await listen<UpdateDownloadEvent>('pymss://managed-update-event', (event) => {
+            if (event.payload.event === 'SourceSelected') {
+              selectedSource.value = event.payload.data.source
+              downloadDownloadedBytes.value = 0
+              downloadTotalBytes.value = 0
+              downloadSpeedBytesPerSecond.value = 0
+              lastProgressLogAt = 0
+              lastProgressLogPercent = -1
+              status.value = 'downloading'
+              const source = event.payload.data.source === 'github' ? 'GitHub'
+                : event.payload.data.source === 'modelscope' ? 'ModelScope' : 'Custom endpoint'
+              appendDownloadLog(`${event.payload.data.fallback ? 'Retrying download from' : 'Download source:'} ${source}`)
+              return
+            }
             if (event.payload.event === 'Started') {
               const total = Number(event.payload.data.contentLength || 0)
               downloadTotalBytes.value = Number.isFinite(total) && total > 0 ? total : 0
@@ -182,6 +198,7 @@ export const useUpdateStore = defineStore('update', () => {
     releaseDate.value = ''
     updateMessage.value = ''
     manualInstallUrl.value = ''
+    selectedSource.value = undefined
   }
 
   function resetDownloadProgress() {
@@ -233,6 +250,7 @@ export const useUpdateStore = defineStore('update', () => {
           const update = await invoke<ManagedUpdate | null>('check_managed_update', {
             channel: settings.updateChannel,
             endpointOverride: endpointOverride || null,
+            source: settings.updateSource || 'auto',
           })
           currentVersion.value = update?.currentVersion || app.buildInfoVersion || ''
           lastCheckedAt.value = new Date().toISOString()
@@ -247,6 +265,7 @@ export const useUpdateStore = defineStore('update', () => {
           releaseDate.value = update.date || ''
           updateMessage.value = update.updateMessage || ''
           manualInstallUrl.value = update.manualInstallUrl || ''
+          selectedSource.value = update.source
           status.value = deferredVersion.value === update.version ? 'ready' : 'available'
           return update
         } catch (err) {
@@ -268,7 +287,7 @@ export const useUpdateStore = defineStore('update', () => {
     const update = availableUpdate.value
     if (!update) throw new Error('Update package is not available. Check for updates again.')
     if (!update.autoUpdateSupported || update.requiresManualInstall) {
-      throw new Error(update.updateMessage || 'This update requires manual installation from GitHub.')
+      throw new Error(update.updateMessage || 'This update requires manual installation from its release page.')
     }
     status.value = 'downloading'
     resetDownloadProgress()
@@ -283,6 +302,7 @@ export const useUpdateStore = defineStore('update', () => {
         channel: settings.updateChannel,
         endpointOverride: endpointOverride || null,
         expectedVersion: update.version,
+        source: settings.updateSource || 'auto',
       })
       status.value = 'installing'
       appendDownloadLog('Update package staged; restarting application')
@@ -354,6 +374,7 @@ export const useUpdateStore = defineStore('update', () => {
     releaseDate,
     updateMessage,
     manualInstallUrl,
+    selectedSource,
     error,
     lastCheckedAt,
     downloadDownloadedBytes,

@@ -109,12 +109,14 @@ type StoredSettings = {
   proxyUrl?: string
   proxyBypass?: string
   updateChannel?: UpdateChannel
+  updateSource?: UpdateSource
   updateEndpointOverride?: string
 }
 
 export type ProxyMode = 'system' | 'none' | 'custom'
 export type DownloadMethod = 'aria2c' | 'urllib'
 export type UpdateChannel = 'stable' | 'prerelease'
+export type UpdateSource = 'auto' | 'github' | 'modelscope'
 
 const DEFAULT_LOCALE: LocaleSetting = 'system'
 const DEFAULT_DOWNLOAD_SOURCE = 'modelscope'
@@ -254,6 +256,7 @@ export const useSettingsStore = defineStore('settings', () => {
   const proxyUrl = ref(DEFAULT_PROXY_URL)
   const proxyBypass = ref('')
   const updateChannel = ref<UpdateChannel>(DEFAULT_UPDATE_CHANNEL)
+  const updateSource = ref<UpdateSource>('auto')
   const updateEndpointOverride = ref('')
   const startupOnboardingSeen = ref(false)
   const modelDirMigrationState = ref<ModelDirMigrationState>(createEmptyModelDirMigrationState())
@@ -291,6 +294,7 @@ export const useSettingsStore = defineStore('settings', () => {
     proxyUrl: proxyUrl.value,
     proxyBypass: proxyBypass.value,
     updateChannel: updateChannel.value,
+    updateSource: updateSource.value,
     updateEndpointOverride: updateEndpointOverride.value.trim() || undefined,
   }))
 
@@ -356,6 +360,7 @@ export const useSettingsStore = defineStore('settings', () => {
     proxyUrl.value = stored?.proxyUrl || DEFAULT_PROXY_URL
     proxyBypass.value = stored?.proxyBypass || ''
     updateChannel.value = stored?.updateChannel === 'prerelease' ? 'prerelease' : DEFAULT_UPDATE_CHANNEL
+    updateSource.value = stored?.updateSource === 'github' || stored?.updateSource === 'modelscope' ? stored.updateSource : 'auto'
     updateEndpointOverride.value = String(stored?.updateEndpointOverride || '').trim()
     startupOnboardingSeen.value = stored?.startupOnboardingSeen === true
       || String(stored?.startupOnboardingSeenVersion || '').trim().length > 0
@@ -420,6 +425,7 @@ export const useSettingsStore = defineStore('settings', () => {
       proxyUrl,
       proxyBypass,
       updateChannel,
+      updateSource,
       updateEndpointOverride,
     ],
     () => queuePersist(),
@@ -919,6 +925,7 @@ export const useSettingsStore = defineStore('settings', () => {
     proxyUrl,
     proxyBypass,
     updateChannel,
+    updateSource,
     updateEndpointOverride,
     startupOnboardingSeen,
     modelDirMigrationState,
