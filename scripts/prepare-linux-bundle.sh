@@ -42,6 +42,30 @@ PY="$RESOURCES/python-runtime/bin/python3"
 "$PY" -m pip install --no-cache-dir --disable-pip-version-check "requests[socks]>=2.32,<3"
 PYTHONDONTWRITEBYTECODE=1 "$PY" -c 'import sys, requests, socks; assert sys.version_info[:2] == (3, 12); print("Bundled Python:", sys.version); print("requests:", requests.__version__)'
 
+# Synchronize source package version inside this transient CI workspace.
+# The upstream source files can lag behind its release tags; do not commit these edits.
+python3 - "$ROOT" "$VERSION" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+version = sys.argv[2]
+package = root / "package.json"
+data = json.loads(package.read_text(encoding="utf-8"))
+data["version"] = version
+package.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+cargo = root / "src-tauri" / "Cargo.toml"
+text = cargo.read_text(encoding="utf-8")
+text, count = re.subn(r'(?m)^(version\s*=\s*")[^"]+(")', lambda m: m.group(1) + version + m.group(2), text, count=1)
+if count != 1:
+    raise SystemExit("Unable to synchronize the Rust package version")
+cargo.write_text(text, encoding="utf-8")
+print("Synchronized frontend and Rust version:", version)
+PY
+
 # Overlay only the package version and bundled resources. Leave upstream's
 # tauri.conf.json, app identifier, Windows/macOS build scripts unchanged.
 python3 - "$ROOT" "$VERSION" <<'PY'
