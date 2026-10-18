@@ -94,8 +94,8 @@ For a working RTX 4090 setup the probe should report CUDA available and name the
 | **CUDA** | Preinstalled NVIDIA-specific PyTorch inference environment in the release package | Not separately bundled; install with the Linux helper after installing the online DEB |
 | **CPU** | Preinstalled CPU-only PyTorch inference environment in the release package | Not separately bundled; CPU remains installable with `bash ./setup-linux-runtime.sh cpu` |
 | **ROCm** | AMD GPU inference environment; upstream Windows package is based on Windows-specific ROCm wheels | **Not supported by the current Studio Linux runtime manifest** |
-| **Application update** | Update the installed Tauri desktop program | Linux: download/reinstall a newer DEB with `sudo apt install ./new-package.deb`; the official in-app auto-updater is Windows-only |
-| **Runtime/core update** | Update or repair Python `pymss` / `pymss-core` dependencies within the managed inference environment | Conceptually supported on Linux; different from updating the desktop application |
+| **Application update** | Update the installed Tauri desktop program | Linux: download/reinstall a newer DEB with `sudo apt install ./new-package.deb`; the Linux in-app auto-updater is not supported |
+| **Runtime/core update** | Update or repair Python `pymss` / `pymss-core` dependencies within the managed inference environment | The backend supports it, but Linux's GUI manager is read-only; the helper's `--reinstall` restores the versions pinned by the installed app |
 
 **What CI does not prove:** GitHub-hosted standard Ubuntu runners do not expose your RTX 4090 and cannot verify CUDA GPU inference. The build pipeline only confirms that the package can be installed, its bundled Python is functional and the runtime manifest declares Linux/CUDA. Full validation needs a real Ubuntu machine with an NVIDIA driver and a model separation test.
 
@@ -107,13 +107,15 @@ For a working RTX 4090 setup the probe should report CUDA available and name the
 - **GPU acceleration:** Install a compatible driver and select the matching PyTorch runtime from the application. CUDA is not embedded in the initial DEB, Ubuntu 26.04.1 / RTX 4090 has passed CUDA 12.8 worker inference; this is not a certification of every model or GPU.
 - **File locations/permissions:** The packaged bootstrap under `/usr` is read-only for regular users; inference environments are installed into the user's home directory on Linux. This matters if an upstream change tries to write inside application resources.
 - **Validation:** The CI installation matrix is an automated smoke check, *not* an end-to-end AI separation test. On hardware, verify launch, runtime download, one model load, audio import and export.
-- **Upstream synchronization:** Use GitHub's **Sync fork**. Keep Linux-specific changes confined to this documentation, `.github/workflows/release-linux.yml`, and the Linux-only scripts. The preparation script applies one transient frontend guard to bypass WebKitGTK's crashing ripple transition; it fails for review if upstream changes that guard. Do not rename the application's internal identifier or edit upstream Windows/macOS build scripts.
+- **Upstream synchronization:** Use GitHub's **Sync fork**. Keep Linux-specific changes confined to this documentation, `.github/workflows/release-linux.yml`, and the Linux-only scripts. The preparation script applies transient frontend compatibility overlays to bypass WebKitGTK's crashing ripple transition; it fails for review if upstream changes that guard. Do not rename the application's internal identifier or edit upstream Windows/macOS build scripts.
 
 ## Linux GUI compatibility overlay
 
 On Ubuntu 26.04.1 with WebKitGTK 2.52.6, completing onboarding reproduced a native `SIGSEGV` (exit 139) inside `libwebkit2gtk-4.1.so.0`. The failing action calls `document.startViewTransition`. Disabling DMA-BUF or compositing did not resolve it in the desktop test.
 
 The Linux preparation script adds a single Linux guard to `src/utils/theme.ts` **only in the transient build workspace**, preserving the normal update callback while omitting the ripple ViewTransition. No upstream application source file is changed in this fork's Git history. The overlay applies to Linux packages and is explicitly checked so an upstream source change cannot silently bypass it.
+
+The Linux preparation script also injects `scripts/linux-media-compat.js` into the transient frontend entry point. This works around WebKitGTK's inability to play local Tauri `asset:` audio URLs ([Tauri #8654](https://github.com/tauri-apps/tauri/issues/8654)). Normal playback is attempted first; only a local-asset `NotSupportedError` triggers a fetch-to-Blob fallback. Owned Blob URLs and pending reads are released when the existing preview cache removes or replaces the source. Other platforms and ordinary HTTP/Blob sources keep their normal behavior. A selected preview is held in memory until released; this is not a streaming server.
 
 ## Local source build (developers)
 

@@ -48,6 +48,7 @@ python3 - "$ROOT" "$VERSION" <<'PY'
 import json
 import pathlib
 import re
+import shutil
 import sys
 
 root = pathlib.Path(sys.argv[1])
@@ -76,6 +77,18 @@ if source.count(guard) != 1:
 replacement = "if (navigator.userAgent.includes('Linux') || !origin || !doc.startViewTransition) {"
 theme.write_text(source.replace(guard, replacement), encoding="utf-8")
 print("Applied Linux WebKitGTK ViewTransition compatibility overlay")
+
+# Linux WebKitGTK cannot play Tauri asset: media URLs directly. This adapter
+# falls back to a fetched Blob on the first failed play, with cache cleanup.
+shutil.copyfile(root / "scripts" / "linux-media-compat.js", root / "src" / "linux-media-compat.js")
+(root / "src" / "linux-media-compat.d.ts").write_text("export {}\n", encoding="utf-8")
+main = root / "src" / "main.ts"
+entry = main.read_text(encoding="utf-8")
+marker = "import './linux-media-compat.js'\n"
+if marker in entry:
+    raise SystemExit("Linux media overlay was already applied; use a clean workspace")
+main.write_text(marker + entry, encoding="utf-8")
+print("Applied Linux WebKitGTK media playback compatibility overlay")
 PY
 
 # Overlay only the package version and bundled resources. Leave upstream's

@@ -4,7 +4,7 @@
 
 - **Target:** Linux x86_64 (amd64), built on Ubuntu 22.04, with installation checks on Ubuntu 22.04, 24.04, and 26.04.
 - **Package:** One `.deb` artifact, not a different binary for each Ubuntu release.
-- **Scope:** Linux packaging and validation; upstream source files are preserved in Git. One build-time Linux guard bypasses a WebKitGTK transition crash (see LINUX.md).
+- **Scope:** Linux packaging and validation; upstream source files are preserved in Git. Build-time Linux overlays handle WebKitGTK transitions and local audio preview (see LINUX.md).
 - **Runtime:** Run the artifact's `setup-linux-runtime.sh cuda` for NVIDIA, or `cpu`. The upstream Linux GUI runtime manager is currently read-only.
 - **Download:** [Actions → Build Linux DEB](https://github.com/ChrisTorng/pymss-studio-linux/actions/workflows/release-linux.yml). Run the workflow and download the `pymss-studio-linux-amd64` artifact.
 - **Installation, runtime requirements, limitations, and troubleshooting:** [LINUX.md](LINUX.md).
