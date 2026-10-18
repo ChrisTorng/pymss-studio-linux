@@ -154,6 +154,17 @@ pub async fn start_managed_update(
 }
 
 #[tauri::command]
+pub fn confirm_managed_update_startup(window: tauri::WebviewWindow) -> AppResult<()> {
+    #[cfg(target_os = "macos")]
+    if window.label() == "main" {
+        crate::macos_update::confirm_startup(window.app_handle())?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn worker_health(app: AppHandle) -> AppResult<Value> {
     run_worker_once(&app, "health")
 }

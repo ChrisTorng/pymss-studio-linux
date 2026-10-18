@@ -26,6 +26,22 @@ jobs:
       - name: Verify runtime plans, activation recovery, and offline package updates
         run: python -m unittest discover -s tests/python -t tests -p "test_runtime_core_*.py"
 
+  macos-updater:
+    name: macOS updater
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify archive generation and platform-specific installation
+        run: |
+          python -m unittest discover -s tests/python -t tests -p 'test_macos_update_release.py'
+          cargo test --manifest-path src-tauri/Cargo.toml macos_update
+          cargo test --manifest-path src-tauri/Cargo.toml single_instance
+
   validate:
     runs-on: windows-latest
     timeout-minutes: 30

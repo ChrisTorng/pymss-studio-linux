@@ -99,7 +99,8 @@ jobs:
           echo "RELEASE_VERSION=${version}" >> "$GITHUB_ENV"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           windows_result="${{ needs.windows.result }}"
-          if [[ "$windows_result" != "success" ]]; then
+          macos_result="${{ needs.macos.result }}"
+          if [[ "$windows_result" != "success" && "$macos_result" != "success" ]]; then
             echo "RELEASE_PRERELEASE=true" >> "$GITHUB_ENV"
           elif [[ "$version" == *-* ]]; then
             echo "RELEASE_PRERELEASE=true" >> "$GITHUB_ENV"
@@ -107,6 +108,7 @@ jobs:
             echo "RELEASE_PRERELEASE=${{ github.event_name == 'workflow_dispatch' && inputs.prerelease == true }}" >> "$GITHUB_ENV"
           fi
           requested_auto_update="${{ github.event_name == 'workflow_dispatch' && inputs.allow_auto_update == true }}"
+          echo "RELEASE_MACOS_AUTO_UPDATE_SUPPORTED=$requested_auto_update" >> "$GITHUB_ENV"
           previous_tag="$(git tag --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' | grep -v "^${release_tag}$" | head -n 1 || true)"
           runtime_compatible=false
           compatibility_reason="No previous release with a complete Windows runtime and package contract was found."
@@ -205,8 +207,11 @@ jobs:
             fi
           done
       - name: Sign managed update assets
-        if: needs.windows.result == 'success'
+        if: needs.windows.result == 'success' || needs.macos.result == 'success'
         shell: bash
+        env:
+          WINDOWS_BUILD_RESULT: ${{ needs.windows.result }}
+          MACOS_BUILD_RESULT: ${{ needs.macos.result }}
         run: |
           set -euo pipefail
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
@@ -214,67 +219,37 @@ jobs:
             exit 1
           fi
           shopt -s nullglob
-          files=(artifacts/*-windows-x64-update.zip)
-          if [ "${#files[@]}" -ne 1 ]; then
-            echo "Expected one universal Windows update archive, found ${#files[@]}" >&2
-            printf '%s\n' "${files[@]}" >&2
-            exit 1
+          files=()
+          if [ "$WINDOWS_BUILD_RESULT" = "success" ]; then
+            windows=(artifacts/*-windows-x64-update.zip)
+            if [ "${#windows[@]}" -ne 1 ]; then
+              echo "Expected one Windows update archive" >&2
+              exit 1
+            fi
+            files+=("${windows[@]}")
           fi
-          max_update_size=$((512 * 1024 * 1024))
+          if [ "$MACOS_BUILD_RESULT" = "success" ]; then
+            macos=(artifacts/*-macos-arm64-update.app.tar.gz)
+            if [ "${#macos[@]}" -ne 1 ]; then
+              echo "Expected one macOS update archive" >&2
+              exit 1
+            fi
+            files+=("${macos[@]}")
+          fi
           for file in "${files[@]}"; do
+            max_update_size=$((2 * 1024 * 1024 * 1024 - 1))
+            if [[ "$file" == *-windows-x64-update.zip ]]; then
+              max_update_size=$((512 * 1024 * 1024))
+            fi
             if [ "$(stat -c%s "$file")" -gt "$max_update_size" ]; then
-              echo "Managed update archive exceeds the 512 MiB client limit: $file" >&2
+              echo "Managed update archive exceeds its platform size limit: $file" >&2
               exit 1
             fi
             pnpm dlx @tauri-apps/cli@2.11.0 signer sign "$file"
           done
       - name: Generate managed update metadata
-        if: needs.windows.result == 'success'
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          version = os.environ["RELEASE_TAG"].removeprefix("v")
-          tag = os.environ["RELEASE_TAG"]
-          prerelease = os.environ.get("RELEASE_PRERELEASE", "false").lower() == "true"
-          channels = ("prerelease",) if prerelease else ("stable", "prerelease")
-          auto_update_supported = os.environ.get("RELEASE_AUTO_UPDATE_SUPPORTED", "false").lower() == "true"
-          manual_install = not auto_update_supported
-          manual_message = os.environ.get("RELEASE_UPDATE_MESSAGE") or "This release requires manual installation from GitHub."
-          if not manual_install:
-              manual_message = ""
-          manual_url = f"https://github.com/pymss-project/pymss-studio/releases/tag/{tag}"
-          generated = []
-          asset = f"Pymss-Studio-{version}-windows-x64-update.zip"
-          signature = Path(f"artifacts/{asset}.sig").read_text(encoding="utf-8").strip()
-          for channel in channels:
-              data = {
-                  "version": version,
-                  "notes": "See the GitHub release notes for details.",
-                  "pub_date": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-                  "prerelease": prerelease,
-                  "channel": channel,
-                  "pymss_update_supported": not manual_install,
-                  "pymss_requires_manual_install": manual_install,
-                  "pymss_update_message": manual_message,
-                  "pymss_manual_install_url": manual_url,
-                  "platforms": {
-                      "windows-x86_64": {
-                          "signature": signature,
-                          "url": f"https://github.com/pymss-project/pymss-studio/releases/download/{tag}/{asset}",
-                      }
-                  },
-              }
-              name = f"{channel}-v1-windows-x64-update.json"
-              Path(f"artifacts/{name}").write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-              generated.append(name)
-          Path("artifacts/managed-update-metadata.txt").write_text("\n".join(generated) + "\n", encoding="utf-8")
-          PY
+        if: needs.windows.result == 'success' || needs.macos.result == 'success'
+        run: python3 scripts/generate-update-metadata.py
       - name: Generate release checksums
         shell: bash
         run: |
@@ -309,7 +284,7 @@ jobs:
           files: artifacts/*
 
       - uses: softprops/action-gh-release@v2
-        if: needs.windows.result == 'success'
+        if: needs.windows.result == 'success' || needs.macos.result == 'success'
         with:
           tag_name: updater
           name: Pymss Studio Update Channel
@@ -317,7 +292,7 @@ jobs:
           prerelease: true
           make_latest: false
           overwrite_files: true
-          files: artifacts/*-windows-x64-*.json
+          files: artifacts/*-v1-*-update.json
 
       - name: Set up uv
         id: setup_mirror_uploads
