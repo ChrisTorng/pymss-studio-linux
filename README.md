@@ -7,6 +7,7 @@
 - **Scope:** Linux packaging and validation; upstream source files are preserved in Git. Build-time Linux overlays handle WebKitGTK transitions and local audio preview (see LINUX.md).
 - **Runtime:** Run the artifact's `setup-linux-runtime.sh cuda` for NVIDIA, or `cpu`. The upstream Linux GUI runtime manager is currently read-only.
 - **Download:** [Actions → Build Linux DEB](https://github.com/ChrisTorng/pymss-studio-linux/actions/workflows/release-linux.yml). Run the workflow and download the `pymss-studio-linux-amd64` artifact.
+- **Verified:** `0.0.21-5`; RTX 4090 / CUDA 12.8, GUI separation and audio playback on Ubuntu 26.04.1. See the [verification record](LINUX.md#verification-record--2026-10-18).
 - **Installation, runtime requirements, limitations, and troubleshooting:** [LINUX.md](LINUX.md).
 - **Upstream source/releases:** [pymss-project/pymss-studio](https://github.com/pymss-project/pymss-studio).
 

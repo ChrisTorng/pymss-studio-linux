@@ -113,7 +113,7 @@ For a working RTX 4090 setup the probe should report CUDA available and name the
 
 On Ubuntu 26.04.1 with WebKitGTK 2.52.6, completing onboarding reproduced a native `SIGSEGV` (exit 139) inside `libwebkit2gtk-4.1.so.0`. The failing action calls `document.startViewTransition`. Disabling DMA-BUF or compositing did not resolve it in the desktop test.
 
-The Linux preparation script adds a single Linux guard to `src/utils/theme.ts` **only in the transient build workspace**, preserving the normal update callback while omitting the ripple ViewTransition. No upstream application source file is changed in this fork's Git history. The overlay applies to Linux packages and is explicitly checked so an upstream source change cannot silently bypass it.
+The Linux preparation script adds a single Linux guard to `src/utils/theme.ts` **only in the transient build workspace**, preserving the normal update callback while omitting the ripple ViewTransition. The tracked application source remains identical to the merged upstream; these compatibility changes are generated only while building Linux. The overlay applies to Linux packages and is explicitly checked so an upstream source change cannot silently bypass it.
 
 The Linux preparation script also injects `scripts/linux-media-compat.js` into the transient frontend entry point. This works around WebKitGTK's inability to play local Tauri `asset:` audio URLs ([Tauri #8654](https://github.com/tauri-apps/tauri/issues/8654)). Normal playback is attempted first; only a local-asset `NotSupportedError` triggers a fetch-to-Blob fallback. Owned Blob URLs and pending reads are released when the existing preview cache removes or replaces the source. Other platforms and ordinary HTTP/Blob sources keep their normal behavior. A selected preview is held in memory until released; this is not a streaming server.
 
@@ -128,6 +128,22 @@ The packaging workflow uses [python-build-standalone](https://github.com/astral-
 Original `ci.yml`, `release.yml`, `release-windows.yml`, and `release-macos.yml` remain unchanged to minimize upstream merge conflicts. Disable these four **in this fork** using **Actions → select workflow → … → Disable workflow**. Keep **Build Linux DEB** enabled. The connected GitHub tools currently cannot change the GitHub-side enabled/disabled state.
 
 To report issues with **Linux packaging**, open an issue on this fork; for **application functionality**, check upstream first.
+
+## Verification record — 2026-10-18
+
+Validated package: **`0.0.21-5`**, upstream app version **`0.0.21`**, source commit [`62bd6d1`](https://github.com/ChrisTorng/pymss-studio-linux/commit/62bd6d153c5ea34fa6f7da6b724c08841a532316). Upstream was merged through [`961509f`](https://github.com/pymss-project/pymss-studio/commit/961509f09986fc8358f7a7f783e4bcf3b062110a).
+
+- **CI:** [Actions run 39123888329](https://github.com/ChrisTorng/pymss-studio-linux/actions/runs/39123888329) built on Ubuntu 22.04 and passed DEB installation, bundled Python and native-library checks on Ubuntu 22.04, 24.04 and 26.04. These runners did not perform GPU inference.
+- **DEB SHA256:** `5064624bcc3bda372b22f92635ab15183ef80b36e91880f4a6ac027dc697afa6`.
+- **Host installation:** upgraded from `0.0.21` to `0.0.21-5` using the staged installer. APT completed without the `_apt Permission denied` notice; the home directory remained private (`0750`), and staging was removed afterward. The installed `/usr/bin/pymss-studio` matched the tested DEB binary.
+- **Hardware:** Ubuntu 26.04.1 LTS, NVIDIA GeForce RTX 4090, NVIDIA driver 595.99.02. The host's Python 3.14.4 was not used for inference.
+- **Runtime:** bundled Python 3.12.13; PyTorch 2.7.1+cu128 / CUDA 12.8; pymss 2.1.8; pymss-core 0.1.11. CUDA matrix multiplication and `pip check` passed.
+- **Real model:** `scnet_checkpoint_musdb18.ckpt`, downloaded through Studio's Worker. A 15-second, 44.1 kHz stereo excerpt was separated on `cuda:0` into drums, bass, other and vocals. All four WAVs had 661,500 stereo frames, finite samples and nonzero RMS.
+- **Desktop flow:** onboarding, native file import, model selection, CUDA separation and local vocal preview playback/pause were exercised using the DEB's actual Tauri/WebKitGTK application. The final GUI Worker completed the 15-second clip in 2.737 seconds. A subsequent separation using the formally installed Worker and Python path completed in 2.39 seconds (individual local runs, not a benchmark). Preview advanced normally and reported a 15-second duration.
+- **Music credit:** “Let's Go Fishin'” by Karissa Hobbs, [Free Music Archive](https://freemusicarchive.org/music/Karissa_Hobbs/Age_of_Flowers/09_Lets_Go_Fishin), [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/), obtained from librosa's public example audio collection; the test used seconds 30–45.
+- **Install helper:** tested with a private home / restrictive umask, a DEB filename containing spaces, APT failure propagation and temporary-file cleanup. It stages only the DEB and does not change home-directory permissions.
+
+This verifies the tested model and host. It does not establish desktop/GPU support on every matrix OS, certify all separation models, or measure separation quality against reference stems.
 
 ## References
 
