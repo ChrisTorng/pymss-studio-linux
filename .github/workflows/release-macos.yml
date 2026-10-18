@@ -245,6 +245,11 @@ jobs:
           PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$(dirname "$WORKER")/runtime_audio_probe.py" --check-core
           codesign --verify --deep --strict --verbose=4 "$APP"
 
+      - name: Verify core overlay installation and rollback preserve the signed app
+        run: |
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio.app' | head -n 1)
+          python3 scripts/check-macos-core-update.py "$APP"
+
       - name: Build managed macOS update archive from final signed app
         run: |
           VERSION="${PYMSS_VERSION#v}"

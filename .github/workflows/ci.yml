@@ -41,6 +41,7 @@ jobs:
           python -m unittest discover -s tests/python -t tests -p 'test_macos_update_release.py'
           cargo test --manifest-path src-tauri/Cargo.toml macos_update
           cargo test --manifest-path src-tauri/Cargo.toml single_instance
+          cargo test --manifest-path src-tauri/Cargo.toml bundled_bootstrap_uses_user_overlay_without_changing_bundle
 
   validate:
     runs-on: windows-latest

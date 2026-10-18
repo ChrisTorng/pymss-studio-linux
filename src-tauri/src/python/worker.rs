@@ -1808,6 +1808,40 @@ mod tests {
     }
 
     #[test]
+    fn bundled_bootstrap_uses_user_overlay_without_changing_bundle() {
+        let fixture = ResourceFixture::new("bundled-user-overlay");
+        let bundled = fixture.0.join("Installed.app/Contents/Resources/python-runtime");
+        let python = bundled.join("bin/python3");
+        fixture.file(&python);
+        let bundled_pointer = bundled.join("runtime-envs/active-runtime.json");
+        fs::create_dir_all(bundled_pointer.parent().unwrap()).unwrap();
+        let bundled_state = serde_json::to_vec(&json!({
+            "backend": "mlx", "source": "bundled", "pythonPath": "../bin/python3",
+        })).unwrap();
+        fs::write(&bundled_pointer, &bundled_state).unwrap();
+        let user_root = fixture.0.join("user/runtime-envs");
+        let overlay = user_root.join(".overlays/mlx/generation/site-packages");
+        fs::create_dir_all(&overlay).unwrap();
+        let user_pointer = user_root.join("active-runtime.json");
+        fs::write(&user_pointer, serde_json::to_vec(&json!({
+            "backend": "mlx", "source": "bundled", "pythonPath": python,
+            "overlayPath": overlay,
+        })).unwrap()).unwrap();
+        let active_python = super::resolve_active_runtime_record(&bundled_pointer).unwrap().0;
+        assert!(super::is_bundled_runtime_python_path(&bundled_pointer, &active_python).unwrap());
+        assert_eq!(super::resolve_runtime_overlay_for_record(
+            &user_pointer, &active_python, &[user_root.clone()],
+        ), Some(overlay.canonicalize().unwrap()));
+        fs::write(&user_pointer, serde_json::to_vec(&json!({
+            "backend": "mlx", "source": "bundled", "pythonPath": python,
+        })).unwrap()).unwrap();
+        assert_eq!(super::resolve_runtime_overlay_for_record(
+            &user_pointer, &active_python, &[user_root],
+        ), None);
+        assert_eq!(fs::read(bundled_pointer).unwrap(), bundled_state);
+    }
+
+    #[test]
     fn runtime_overlay_must_match_the_active_python_and_runtime_root() {
         let fixture = ResourceFixture::new("runtime-overlay");
         let runtime_root = fixture.0.join("runtime-envs");
