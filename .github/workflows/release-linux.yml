@@ -100,12 +100,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p package
+          bash -n scripts/prepare-linux-bundle.sh scripts/install-linux-deb.sh
+          install -m 0644 scripts/install-linux-deb.sh package/install-linux-deb.sh
           find src-tauri/target/release/bundle/deb -maxdepth 1 -name '*.deb' \
             -type f -exec cp -v {} package/ \;
           test "$(find package -maxdepth 1 -name '*.deb' | wc -l)" -eq 1
           dpkg-deb --info package/*.deb
           dpkg-deb --contents package/*.deb | grep -E 'python-runtime/bin/python3|python/worker.py'
-          (cd package && sha256sum *.deb > SHA256SUMS)
+          (cd package && sha256sum *.deb install-linux-deb.sh > SHA256SUMS)
           ls -lh package/
 
       - uses: actions/upload-artifact@v4

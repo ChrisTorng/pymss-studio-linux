@@ -15,7 +15,7 @@ This is an **unofficial, packaging-only** fork of [pymss-project/pymss-studio](h
 1. Open [**Actions → Build Linux DEB**](https://github.com/ChrisTorng/pymss-studio-linux/actions/workflows/release-linux.yml) and choose **Run workflow** on `main`.
 2. Leave the version override blank to derive the package version from the latest reachable upstream-style `vX.Y.Z` Git tag, or provide a specific `X.Y.Z` override when building a known release.
 3. The build job creates **one** `.deb`. CI then attempts installation and bundled-Python smoke tests in three Ubuntu environments.
-4. When the workflow completes, open the run and download the **`pymss-studio-linux-amd64`** artifact ZIP. Unzip it to get the `.deb` and `SHA256SUMS`. Do not treat a failed validation job as a verified release.
+4. When the workflow completes, open the run and download the **`pymss-studio-linux-amd64`** artifact ZIP. Unzip it to get the `.deb`, `install-linux-deb.sh`, and `SHA256SUMS` (older artifacts contain only the DEB and checksums). Do not treat a failed validation job as a verified release.
 
 The workflow is **manual-only** (`workflow_dispatch`), so syncing upstream does not automatically rebuild Linux packages or create duplicate releases. Workflow artifacts expire according to the repository's GitHub Actions retention settings. They are not yet permanent GitHub Releases.
 
@@ -24,11 +24,28 @@ The workflow is **manual-only** (`workflow_dispatch`), so syncing upstream does 
 Open a terminal in the directory holding the downloaded `.deb`:
 
 ```bash
-sudo apt update
-sudo apt install ./pymss-studio*.deb
+sha256sum --check SHA256SUMS
+bash ./install-linux-deb.sh ./*.deb
 ```
 
-Use `apt install ./...`, **not** `dpkg -i`, so system dependencies are resolved automatically.
+The helper resolves dependencies with APT. It stages a readable copy under `/var/tmp` before installation, then removes that copy. This lets APT's `_apt` sandbox read the DEB even if your home directory is private; your home permissions remain unchanged.
+
+For an older artifact without the helper, use the same staging approach:
+
+```bash
+(
+  set -eu
+  deb="$(realpath ./*.deb)"
+  stage="$(mktemp -d /var/tmp/pymss-studio-install.XXXXXX)"
+  trap 'rm -f -- "$stage/pymss-studio.deb"; rmdir -- "$stage"' EXIT
+  chmod 0755 "$stage"
+  install -m 0644 -- "$deb" "$stage/pymss-studio.deb"
+  sudo apt update
+  sudo apt install "$stage/pymss-studio.deb"
+)
+```
+
+Use APT, **not** `dpkg -i`, so system dependencies are resolved automatically. A final `Download is performed unsandboxed as root ... couldn't be accessed by user '_apt' ... Permission denied` notice from an earlier direct installation indicates that APT fell back to root to read a private source path. It does not by itself mean installation failed; verify with `dpkg-query -W -f='${Status}\n' pymss-studio` (expected: `install ok installed`). Staging fixes the access problem instead of hiding the notice or weakening home-directory permissions.
 
 Start **Pymss Studio** from your desktop application's launcher. On the first launch open **Settings → Runtime** (or finish onboarding) and install a supported CPU/CUDA inference environment, then download your required separation models. An Internet connection and free disk space are required for this step. For NVIDIA acceleration, install and validate the NVIDIA driver *on the host Ubuntu system*; this `.deb` does not include drivers.
 
@@ -85,7 +102,7 @@ For a working RTX 4090 setup the probe should report CUDA available and name the
 - **GPU acceleration:** Install a compatible driver and select the matching PyTorch runtime from the application. CUDA is not embedded in the initial DEB, and CUDA support on Ubuntu 26.04 is not yet independently validated by this fork.
 - **File locations/permissions:** The packaged bootstrap under `/usr` is read-only for regular users; inference environments are installed into the user's home directory on Linux. This matters if an upstream change tries to write inside application resources.
 - **Validation:** The CI installation matrix is an automated smoke check, *not* an end-to-end AI separation test. On hardware, verify launch, runtime download, one model load, audio import and export.
-- **Upstream synchronization:** Use GitHub's **Sync fork**. Keep Linux-specific changes confined to this documentation, `.github/workflows/release-linux.yml`, and `scripts/prepare-linux-bundle.sh`. Do not rename the application's internal identifier or edit upstream Windows/macOS build scripts.
+- **Upstream synchronization:** Use GitHub's **Sync fork**. Keep Linux-specific changes confined to this documentation, `.github/workflows/release-linux.yml`, and the Linux-only `scripts/prepare-linux-bundle.sh` / `scripts/install-linux-deb.sh`. Do not rename the application's internal identifier or edit upstream Windows/macOS build scripts.
 
 ## Local source build (developers)
 
