@@ -7,6 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VERSION="${1:?Usage: bash scripts/prepare-linux-bundle.sh X.Y.Z}"
 PBS_TAG="${PBS_TAG:-20260602}"
 PBS_PYTHON_VERSION="${PBS_PYTHON_VERSION:-3.12.13}"
+PBS_PYTHON_SHA256="${PBS_PYTHON_SHA256:-191b5188b42886fb8a14968d714571e8f3d1cef92ac7ad4c7e24cc4d0929b194}"
 RESOURCES="$ROOT/src-tauri/resources"
 ARCHIVE="cpython-${PBS_PYTHON_VERSION}+${PBS_TAG}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
 URL="https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_TAG}/${ARCHIVE/+/%2B}"
@@ -31,6 +32,7 @@ find "$RESOURCES/python" -type f -name '*.pyc' -delete
 
 echo "Preparing relocatable Python $PBS_PYTHON_VERSION ($PBS_TAG)"
 curl --fail --location --retry 3 --retry-delay 3 --output "$TMP/python.tar.gz" "$URL"
+printf '%s  %s\n' "$PBS_PYTHON_SHA256" "$TMP/python.tar.gz" | sha256sum --check
 tar -xzf "$TMP/python.tar.gz" -C "$TMP"
 test -x "$TMP/python/bin/python3"
 mv "$TMP/python" "$RESOURCES/python-runtime"
