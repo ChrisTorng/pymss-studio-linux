@@ -1,3 +1,20 @@
+# Pymss Studio — Unofficial Linux Builds
+
+> **Unofficial packaging-only fork.** This repository builds Ubuntu / Debian-family `.deb` packages for [Pymss Studio](https://github.com/pymss-project/pymss-studio), which does not currently distribute Linux installers. All application development and credits belong to the upstream project. This fork is not affiliated with or endorsed by the upstream maintainers.
+
+- **Target:** Linux x86_64 (amd64), built on Ubuntu 22.04, with installation checks on Ubuntu 22.04, 24.04, and 26.04.
+- **Package:** One `.deb` artifact, not a different binary for each Ubuntu release.
+- **Scope:** Linux packaging and validation only; upstream app code is preserved.
+- **Download:** [Actions → Build Linux DEB](https://github.com/ChrisTorng/pymss-studio-linux/actions/workflows/release-linux.yml). Run the workflow and download the `pymss-studio-linux-amd64` artifact.
+- **Installation, runtime requirements, limitations, and troubleshooting:** [LINUX.md](LINUX.md).
+- **Upstream source/releases:** [pymss-project/pymss-studio](https://github.com/pymss-project/pymss-studio).
+
+GitHub fork synchronization is maintained. Linux builds are independent from the upstream Windows/macOS release pipelines. The `main` branch tracks the upstream source, with only Linux-specific packaging changes.
+
+---
+
+<!-- Upstream README, retained below -->
+
 <!-- markdownlint-disable MD013 MD033 MD041 -->
 
 <p align="center">
