@@ -49,6 +49,34 @@ sudo apt remove pymss-studio
 
 The user's application data, projects, downloaded models, and installed inference environments are generally under `~/.pymss-studio/` and are not intentionally removed by `apt remove`. Back them up before major upgrades. Avoid running the GUI as root.
 
+## NVIDIA RTX 4090 / CUDA on Ubuntu 26.04
+
+The single **online/bootstrap** DEB supports choosing the GPU runtime *after* installation. You do not need a separate Linux CUDA installer or a system-wide CUDA Toolkit merely to run the PyTorch CUDA wheel. The package itself contains **neither** PyTorch nor CUDA GPU libraries.
+
+1. Install and verify a compatible NVIDIA driver on the Ubuntu host. Check `nvidia-smi`. The upstream runtime manifest currently requests **PyTorch 2.7.1 with CUDA 12.8 (cu128)**; compare your driver with the [NVIDIA CUDA 12.8 compatibility documentation](https://docs.nvidia.com/cuda/archive/12.8.0/cuda-toolkit-release-notes/index.html).
+2. Start Pymss Studio and choose **CUDA** during onboarding or in **Settings → Runtime → Install runtime**. Allow the program to download its CUDA-enabled PyTorch and inference packages into your home directory.
+3. After the installation, verify from the Ubuntu terminal:
+
+```bash
+nvidia-smi
+~/.pymss-studio/runtime-envs/cuda/bin/python -c 'import torch; print("torch:", torch.__version__, "CUDA:", torch.version.cuda); print("available:", torch.cuda.is_available()); print("GPU:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "not available")'
+```
+
+For a working RTX 4090 setup the probe should report CUDA available and name the NVIDIA GPU. The `CUDA Version` field of `nvidia-smi` describes driver capability, not proof that a system-wide CUDA Toolkit is installed.
+
+**Backend and distribution terminology:**
+
+| Term | Meaning in this fork | Linux status |
+| --- | --- | --- |
+| **Online** | Small initial desktop package with bundled Python 3.12 bootstrap; install CPU/CUDA inference runtime separately through the UI | **Current Linux DEB strategy** |
+| **CUDA** | Preinstalled NVIDIA-specific PyTorch inference environment in the release package | Not separately bundled; install through the UI after installing the online DEB |
+| **CPU** | Preinstalled CPU-only PyTorch inference environment in the release package | Not separately bundled; CPU remains installable as another runtime |
+| **ROCm** | AMD GPU inference environment; upstream Windows package is based on Windows-specific ROCm wheels | **Not supported by the current Studio Linux runtime manifest** |
+| **Application update** | Update the installed Tauri desktop program | Linux: download/reinstall a newer DEB with `sudo apt install ./new-package.deb`; the official in-app auto-updater is Windows-only |
+| **Runtime/core update** | Update or repair Python `pymss` / `pymss-core` dependencies within the managed inference environment | Conceptually supported on Linux; different from updating the desktop application |
+
+**What CI does not prove:** GitHub-hosted standard Ubuntu runners do not expose your RTX 4090 and cannot verify CUDA GPU inference. The build pipeline only confirms that the package can be installed, its bundled Python is functional and the runtime manifest declares Linux/CUDA. Full validation needs a real Ubuntu machine with an NVIDIA driver and a model separation test.
+
 ## Compatibility and limitations
 
 - **Ubuntu 26.04:** Ubuntu's standard Python may be 3.14, while upstream's runtime manifest requests 3.12. The bundled standalone Python solves the bootstrap version mismatch. Runtime/model installation and GPU compatibility still require testing.
