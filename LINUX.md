@@ -5,9 +5,9 @@ This is an **unofficial, packaging-only** fork of [pymss-project/pymss-studio](h
 ## Supported systems and package strategy
 
 - Architecture: **x86_64 / amd64** only. ARM64, other CPU architectures, Flatpak, RPM, and AppImage are not built here.
-- The package is **built on Ubuntu 22.04**, the oldest supported target for Tauri 2 / WebKitGTK 4.1. One older-baseline build is generally preferable to three distro-specific builds because older glibc requirements can run on newer Ubuntu releases.
+- The package is **built on Ubuntu 22.04**, the oldest supported target for Tauri 2 / WebKitGTK 4.1. The app retains its upstream version (for example `0.0.21`); the DEB adds a Debian revision from the workflow's build number (for example `0.0.21-3`). A later Linux fix is then an APT upgrade even when upstream's app version is unchanged. A new upstream version takes precedence over any older Linux revision. One older-baseline build is generally preferable to three distro-specific builds because older glibc requirements can run on newer Ubuntu releases.
 - CI checks package **installation and bundled Python on Ubuntu 22.04, 24.04, and 26.04**. This is *not* a guarantee that all UI, media features, GPU drivers or separation models have been exercised on those systems. Real desktop/GPU testing is still required.
-- This is the **online/bootstrap** flavor: a portable Python 3.12 interpreter plus bootstrap dependencies are bundled, but heavy PyTorch/CPU/CUDA inference environments and models are downloaded and configured on first run. The distribution's Python version is not used as a substitute for 3.12.
+- This is the **online/bootstrap** flavor: a portable Python 3.12 interpreter plus bootstrap dependencies are bundled, but heavy PyTorch/CPU/CUDA inference environments and models are downloaded separately. Linux runtime installation uses the helper below; upstream's GUI runtime manager is currently Windows-only. The distribution's Python version is not used as a substitute for 3.12.
 - The `.deb` depends on standard Linux packages including WebKitGTK 4.1, GTK 3, FFmpeg, and aria2. They are resolved by `apt` on your system. It does **not** bundle CUDA or an NVIDIA driver.
 
 ## Download / build in GitHub Actions
@@ -15,9 +15,9 @@ This is an **unofficial, packaging-only** fork of [pymss-project/pymss-studio](h
 1. Open [**Actions → Build Linux DEB**](https://github.com/ChrisTorng/pymss-studio-linux/actions/workflows/release-linux.yml) and choose **Run workflow** on `main`.
 2. Leave the version override blank to derive the package version from the latest reachable upstream-style `vX.Y.Z` Git tag, or provide a specific `X.Y.Z` override when building a known release.
 3. The build job creates **one** `.deb`. CI then attempts installation and bundled-Python smoke tests in three Ubuntu environments.
-4. When the workflow completes, open the run and download the **`pymss-studio-linux-amd64`** artifact ZIP. Unzip it to get the `.deb`, `install-linux-deb.sh`, and `SHA256SUMS` (older artifacts contain only the DEB and checksums). Do not treat a failed validation job as a verified release.
+4. When the workflow completes, open the run and download the **`pymss-studio-linux-amd64`** artifact ZIP. Unzip it to get the `.deb`, `install-linux-deb.sh`, `setup-linux-runtime.sh`, and `SHA256SUMS` (older artifacts contain only the DEB and checksums). Do not treat a failed validation job as a verified release.
 
-The workflow is **manual-only** (`workflow_dispatch`), so syncing upstream does not automatically rebuild Linux packages or create duplicate releases. Workflow artifacts expire according to the repository's GitHub Actions retention settings. They are not yet permanent GitHub Releases.
+Builds on `main` are **manual** (`workflow_dispatch`), so syncing upstream does not automatically rebuild Linux packages or create duplicate releases. Pushes to the dedicated `linux-validation` branch run the same pipeline for packaging fixes. Workflow artifacts expire according to the repository's GitHub Actions retention settings. They are not yet permanent GitHub Releases.
 
 ## Install on Ubuntu 26.04 (also 22.04 / 24.04)
 
@@ -26,6 +26,7 @@ Open a terminal in the directory holding the downloaded `.deb`:
 ```bash
 sha256sum --check SHA256SUMS
 bash ./install-linux-deb.sh ./*.deb
+bash ./setup-linux-runtime.sh cuda   # RTX 4090 / NVIDIA; use cpu for CPU-only
 ```
 
 The helper resolves dependencies with APT. It stages a readable copy under `/var/tmp` before installation, then removes that copy. This lets APT's `_apt` sandbox read the DEB even if your home directory is private; your home permissions remain unchanged.
@@ -47,7 +48,11 @@ For an older artifact without the helper, use the same staging approach:
 
 Use APT, **not** `dpkg -i`, so system dependencies are resolved automatically. A final `Download is performed unsandboxed as root ... couldn't be accessed by user '_apt' ... Permission denied` notice from an earlier direct installation indicates that APT fell back to root to read a private source path. It does not by itself mean installation failed; verify with `dpkg-query -W -f='${Status}\n' pymss-studio` (expected: `install ok installed`). Staging fixes the access problem instead of hiding the notice or weakening home-directory permissions.
 
-Start **Pymss Studio** from your desktop application's launcher. On the first launch open **Settings → Runtime** (or finish onboarding) and install a supported CPU/CUDA inference environment, then download your required separation models. An Internet connection and free disk space are required for this step. For NVIDIA acceleration, install and validate the NVIDIA driver *on the host Ubuntu system*; this `.deb` does not include drivers.
+Close Pymss Studio while configuring a runtime. The helper uses the installed Python 3.12 and upstream Worker, installs the manifest's pinned packages into `~/.pymss-studio/runtime-envs/`, and activates the selected backend. An existing environment is validated and activated without downloading it again. To repair/reinstall it explicitly, run `bash ./setup-linux-runtime.sh cuda --reinstall`. No sudo is needed for runtime setup; the GUI must also run as your regular user.
+
+Then start **Pymss Studio** from the desktop launcher and finish onboarding. The Linux frontend currently says **“Runtime management is available only on Windows”**; installation/switching/repair on Linux uses the helper instead. The application can detect and use the configured runtime. The Python manifest declaring Linux support does not imply that the GUI runtime-management controls are enabled on Linux.
+
+For older artifacts without this helper, download [setup-linux-runtime.sh](https://github.com/ChrisTorng/pymss-studio-linux/blob/main/scripts/setup-linux-runtime.sh) using GitHub's **Download raw file** action, then run it as above. The script uses APT's installed package paths, not the distribution's Python 3.14.
 
 To confirm which packages were installed:
 
@@ -71,7 +76,7 @@ The user's application data, projects, downloaded models, and installed inferenc
 The single **online/bootstrap** DEB supports choosing the GPU runtime *after* installation. You do not need a separate Linux CUDA installer or a system-wide CUDA Toolkit merely to run the PyTorch CUDA wheel. The package itself contains **neither** PyTorch nor CUDA GPU libraries.
 
 1. Install and verify a compatible NVIDIA driver on the Ubuntu host. Check `nvidia-smi`. The upstream runtime manifest currently requests **PyTorch 2.7.1 with CUDA 12.8 (cu128)**; compare your driver with the [NVIDIA CUDA 12.8 compatibility documentation](https://docs.nvidia.com/cuda/archive/12.8.0/cuda-toolkit-release-notes/index.html).
-2. Start Pymss Studio and choose **CUDA** during onboarding or in **Settings → Runtime → Install runtime**. Allow the program to download its CUDA-enabled PyTorch and inference packages into your home directory.
+2. Close Pymss Studio, then run **`bash ./setup-linux-runtime.sh cuda`** from the extracted artifact directory. The helper uses the same upstream runtime installer that Windows exposes through the GUI. Allow it to download CUDA-enabled PyTorch and inference packages into your home directory, then start the GUI.
 3. After the installation, verify from the Ubuntu terminal:
 
 ```bash
@@ -85,9 +90,9 @@ For a working RTX 4090 setup the probe should report CUDA available and name the
 
 | Term | Meaning in this fork | Linux status |
 | --- | --- | --- |
-| **Online** | Small initial desktop package with bundled Python 3.12 bootstrap; install CPU/CUDA inference runtime separately through the UI | **Current Linux DEB strategy** |
-| **CUDA** | Preinstalled NVIDIA-specific PyTorch inference environment in the release package | Not separately bundled; install through the UI after installing the online DEB |
-| **CPU** | Preinstalled CPU-only PyTorch inference environment in the release package | Not separately bundled; CPU remains installable as another runtime |
+| **Online** | Small initial desktop package with bundled Python 3.12 bootstrap; install CPU/CUDA inference runtime separately with the Linux helper | **Current Linux DEB strategy** |
+| **CUDA** | Preinstalled NVIDIA-specific PyTorch inference environment in the release package | Not separately bundled; install with the Linux helper after installing the online DEB |
+| **CPU** | Preinstalled CPU-only PyTorch inference environment in the release package | Not separately bundled; CPU remains installable with `bash ./setup-linux-runtime.sh cpu` |
 | **ROCm** | AMD GPU inference environment; upstream Windows package is based on Windows-specific ROCm wheels | **Not supported by the current Studio Linux runtime manifest** |
 | **Application update** | Update the installed Tauri desktop program | Linux: download/reinstall a newer DEB with `sudo apt install ./new-package.deb`; the official in-app auto-updater is Windows-only |
 | **Runtime/core update** | Update or repair Python `pymss` / `pymss-core` dependencies within the managed inference environment | Conceptually supported on Linux; different from updating the desktop application |
@@ -96,13 +101,19 @@ For a working RTX 4090 setup the probe should report CUDA available and name the
 
 ## Compatibility and limitations
 
-- **Ubuntu 26.04:** Ubuntu's standard Python may be 3.14, while upstream's runtime manifest requests 3.12. The bundled standalone Python solves the bootstrap version mismatch. Runtime/model installation and GPU compatibility still require testing.
+- **Ubuntu 26.04:** Ubuntu's standard Python may be 3.14, while upstream's runtime manifest requests 3.12. The bundled standalone Python solves the bootstrap version mismatch. The runtime helper has been exercised on Ubuntu 26.04.1 with an RTX 4090; other machines still need their own driver/model checks.
 - **Desktop session:** This is a native Tauri 2 / GTK / WebKitGTK app, not a web server. You need a graphical desktop; Docker is not the supported distribution mechanism here.
 - **Audio tools:** FFmpeg/FFprobe and aria2 are provided through Ubuntu's package manager. If features cannot find them, check `command -v ffmpeg ffprobe aria2c`.
-- **GPU acceleration:** Install a compatible driver and select the matching PyTorch runtime from the application. CUDA is not embedded in the initial DEB, and CUDA support on Ubuntu 26.04 is not yet independently validated by this fork.
+- **GPU acceleration:** Install a compatible driver and select the matching PyTorch runtime from the application. CUDA is not embedded in the initial DEB, Ubuntu 26.04.1 / RTX 4090 has passed CUDA 12.8 worker inference; this is not a certification of every model or GPU.
 - **File locations/permissions:** The packaged bootstrap under `/usr` is read-only for regular users; inference environments are installed into the user's home directory on Linux. This matters if an upstream change tries to write inside application resources.
 - **Validation:** The CI installation matrix is an automated smoke check, *not* an end-to-end AI separation test. On hardware, verify launch, runtime download, one model load, audio import and export.
-- **Upstream synchronization:** Use GitHub's **Sync fork**. Keep Linux-specific changes confined to this documentation, `.github/workflows/release-linux.yml`, and the Linux-only `scripts/prepare-linux-bundle.sh` / `scripts/install-linux-deb.sh`. Do not rename the application's internal identifier or edit upstream Windows/macOS build scripts.
+- **Upstream synchronization:** Use GitHub's **Sync fork**. Keep Linux-specific changes confined to this documentation, `.github/workflows/release-linux.yml`, and the Linux-only scripts. The preparation script applies one transient frontend guard to bypass WebKitGTK's crashing ripple transition; it fails for review if upstream changes that guard. Do not rename the application's internal identifier or edit upstream Windows/macOS build scripts.
+
+## Linux GUI compatibility overlay
+
+On Ubuntu 26.04.1 with WebKitGTK 2.52.6, completing onboarding reproduced a native `SIGSEGV` (exit 139) inside `libwebkit2gtk-4.1.so.0`. The failing action calls `document.startViewTransition`. Disabling DMA-BUF or compositing did not resolve it in the desktop test.
+
+The Linux preparation script adds a single Linux guard to `src/utils/theme.ts` **only in the transient build workspace**, preserving the normal update callback while omitting the ripple ViewTransition. No upstream application source file is changed in this fork's Git history. The overlay applies to Linux packages and is explicitly checked so an upstream source change cannot silently bypass it.
 
 ## Local source build (developers)
 

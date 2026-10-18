@@ -1,7 +1,10 @@
 name: Build Linux DEB
 
-# Run on demand only. Do not re-run upstream Windows or macOS release jobs.
+# Main releases remain manual; the dedicated validation branch can test fixes.
+# Upstream synchronization on main does not trigger a build.
 on:
+  push:
+    branches: [linux-validation]
   workflow_dispatch:
     inputs:
       version:
@@ -100,14 +103,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p package
-          bash -n scripts/prepare-linux-bundle.sh scripts/install-linux-deb.sh
-          install -m 0644 scripts/install-linux-deb.sh package/install-linux-deb.sh
-          find src-tauri/target/release/bundle/deb -maxdepth 1 -name '*.deb' \
-            -type f -exec cp -v {} package/ \;
+          bash -n scripts/prepare-linux-bundle.sh scripts/finalize-linux-deb.sh scripts/install-linux-deb.sh scripts/setup-linux-runtime.sh
+          install -m 0644 scripts/install-linux-deb.sh scripts/setup-linux-runtime.sh package/
+          input_deb="$(find src-tauri/target/release/bundle/deb -maxdepth 1 -name '*.deb' -type f)"
+          test -f "$input_deb"
+          bash scripts/finalize-linux-deb.sh "$input_deb" package "${{ steps.version.outputs.version }}" "$GITHUB_RUN_NUMBER"
           test "$(find package -maxdepth 1 -name '*.deb' | wc -l)" -eq 1
           dpkg-deb --info package/*.deb
           dpkg-deb --contents package/*.deb | grep -E 'python-runtime/bin/python3|python/worker.py'
-          (cd package && sha256sum *.deb install-linux-deb.sh > SHA256SUMS)
+          (cd package && sha256sum *.deb install-linux-deb.sh setup-linux-runtime.sh > SHA256SUMS)
           ls -lh package/
 
       - uses: actions/upload-artifact@v4

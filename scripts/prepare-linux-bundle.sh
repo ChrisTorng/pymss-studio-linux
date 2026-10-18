@@ -64,6 +64,18 @@ if count != 1:
     raise SystemExit("Unable to synchronize the Rust package version")
 cargo.write_text(text, encoding="utf-8")
 print("Synchronized frontend and Rust version:", version)
+
+# WebKitGTK 2.52.6 on Ubuntu 26.04 can SIGSEGV when startViewTransition
+# completes onboarding. Keep the normal update callback, omit only its ripple
+# animation in Linux packages. This overlay is transient, not an upstream edit.
+theme = root / "src" / "utils" / "theme.ts"
+source = theme.read_text(encoding="utf-8")
+guard = "if (!origin || !doc.startViewTransition) {"
+if source.count(guard) != 1:
+    raise SystemExit("Review the Linux ViewTransition overlay: upstream guard changed")
+replacement = "if (navigator.userAgent.includes('Linux') || !origin || !doc.startViewTransition) {"
+theme.write_text(source.replace(guard, replacement), encoding="utf-8")
+print("Applied Linux WebKitGTK ViewTransition compatibility overlay")
 PY
 
 # Overlay only the package version and bundled resources. Leave upstream's
