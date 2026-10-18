@@ -77,6 +77,21 @@ jobs:
       - name: Prepare bundled bootstrap Python and Tauri config
         run: bash scripts/prepare-linux-bundle.sh "${{ steps.version.outputs.version }}"
 
+      - name: Verify Linux CPU and CUDA manifest
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path("src-tauri/resources/python/runtime-manifest.json").read_text(encoding="utf-8"))
+          for backend in ("cpu", "cuda"):
+              spec = manifest["backends"][backend]
+              assert "linux" in spec["platforms"], f"{backend} is not supported on Linux"
+              assert spec["torch"]["requirement"] == "torch==2.7.1", backend
+          assert manifest["backends"]["cuda"]["torch"]["indexUrl"].endswith("/cu128")
+          print("Runtime manifest declares Linux CPU and NVIDIA CUDA 12.8 installation support.")
+          PY
+
       - name: Build DEB
         run: pnpm tauri build --bundles deb --config src-tauri/tauri.linux-ci.json
 
