@@ -22,7 +22,7 @@ type ManagedUpdate = {
   date?: string
   body?: string
   prerelease: boolean
-  distribution: 'inno' | 'portable'
+  distribution: 'inno' | 'portable' | 'macosApp'
   autoUpdateSupported: boolean
   requiresManualInstall: boolean
   updateMessage?: string
@@ -305,6 +305,10 @@ export const useUpdateStore = defineStore('update', () => {
         source: settings.updateSource || 'auto',
       })
       status.value = 'installing'
+      if (update.distribution === 'macosApp') {
+        // The backend owns replacement and restart once the macOS bundle changes.
+        return true
+      }
       appendDownloadLog('Update package staged; restarting application')
       lastAcceptedVersion.value = update.version
       deferredVersion.value = ''

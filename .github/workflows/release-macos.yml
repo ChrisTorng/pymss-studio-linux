@@ -109,6 +109,7 @@ jobs:
           PYMSS_BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
           PYMSS_BUILD_REPOSITORY: ${{ github.repository }}
           PYMSS_BUILD_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          PYMSS_BUILD_UPDATE_SUPPORTED: 'true'
           PYMSS_BUILD_TARGET: macos-arm64
           PYMSS_BUILD_VARIANT: macos-arm64-mlx
           PYMSS_BUILD_OFFICIAL: ${{ github.repository == 'pymss-project/pymss-studio' && github.repository_owner == 'pymss-project' && 'true' || 'false' }}
@@ -244,6 +245,23 @@ jobs:
           PATH="$ISOLATED_PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONHOME="$RESOURCE_ROOT/python-runtime" "$ENV_PY" "$(dirname "$WORKER")/runtime_audio_probe.py" --check-core
           codesign --verify --deep --strict --verbose=4 "$APP"
 
+      - name: Verify core overlay installation and rollback preserve the signed app
+        run: |
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio.app' | head -n 1)
+          python3 scripts/check-macos-core-update.py "$APP"
+
+      - name: Build managed macOS update archive from final signed app
+        run: |
+          VERSION="${PYMSS_VERSION#v}"
+          APP=$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name 'Pymss Studio.app' | head -n 1)
+          codesign --verify --deep --strict "$APP"
+          python3 scripts/build-macos-update.py "$APP" "release/Pymss-Studio-${VERSION}-macos-arm64-update.app.tar.gz"
+
+      - name: Verify macOS update logic
+        run: |
+          python3 -m unittest discover -s tests/python -t tests -p 'test_macos_update_release.py'
+          cargo test --manifest-path src-tauri/Cargo.toml macos_update
+
       - name: Build DMG with hdiutil
         run: |
           VERSION="${PYMSS_VERSION#v}"
@@ -269,4 +287,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Pymss-Studio-${{ env.PYMSS_VERSION }}-macos-${{ matrix.arch }}-mlx
-          path: release/Pymss-Studio-${{ env.PYMSS_VERSION }}-macos-${{ matrix.arch }}-mlx.dmg
+          path: |
+            release/*.dmg
+            release/*-macos-arm64-update.app.tar.gz*

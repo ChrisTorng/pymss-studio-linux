@@ -1,4 +1,4 @@
-import { createApp } from 'vue'
+import { createApp, nextTick } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
 import router from './router'
@@ -79,6 +79,12 @@ async function bootstrap() {
   }
   if (appState.buildInfoVersion && updates.hasPendingDeferredVersion(appState.buildInfoVersion)) {
     updates.status = 'ready'
+  }
+  if (isTauriRuntime() && isMainTaskOwner()) {
+    await router.isReady()
+    await nextTick()
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('confirm_managed_update_startup')
   }
   appState.checkRuntimeInfo().then(async (runtime) => {
     // If the active pointer was lost (for example after an overwrite that preserved the

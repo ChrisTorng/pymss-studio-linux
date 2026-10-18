@@ -104,7 +104,11 @@ function desktopStorage({ update = offeredUpdate, checkError, installError, load
           if (checkError) throw checkError
           return structuredClone(update)
         }
-        if (command === 'start_managed_update' && installError) throw installError
+        if (command === 'start_managed_update') {
+          if (installError) throw installError
+          return null
+        }
+        if (command === 'plugin:process|exit') return null
         throw new Error(`Unexpected IPC command: ${command}`)
       },
     },
@@ -391,4 +395,26 @@ test('manual-install releases never dispatch an in-place install', async () => {
   await assert.rejects(store.downloadAndInstall(), /manual installation/)
   assert.equal(storage.commands.includes('start_managed_update'), false)
   assert.deepEqual(storage.payload(), persisted016)
+})
+
+test('macOS installation leaves restart and exit to the backend', async () => {
+  const storage = desktopStorage({ update: { ...offeredUpdate, distribution: 'macosApp' } })
+  const store = newStore()
+  await store.initialize()
+  await store.checkForUpdates(true)
+  assert.equal(await store.downloadAndInstall(), true)
+  assert.equal(store.status, 'installing')
+  assert.equal(storage.commands.includes('start_managed_update'), true)
+  assert.equal(storage.commands.includes('plugin:process|exit'), false)
+  assert.deepEqual(storage.payload(), persisted016)
+})
+
+test('Windows installation saves acceptance before exiting for its update helper', async () => {
+  const storage = desktopStorage()
+  const store = newStore()
+  await store.initialize()
+  await store.checkForUpdates(true)
+  assert.equal(await store.downloadAndInstall(), true)
+  assert.equal(storage.commands.at(-1), 'plugin:process|exit')
+  assert.deepEqual(storage.payload(), { lastAcceptedVersion: offeredUpdate.version })
 })

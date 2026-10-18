@@ -68,6 +68,8 @@ const MANAGED_UPDATE_PROCESS_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 pub enum DistributionKind {
     Inno,
     Portable,
+    #[cfg(target_os = "macos")]
+    MacosApp,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -157,8 +159,15 @@ fn acquire_update_mutex() -> AppResult<UpdateMutex> {
 }
 
 pub fn current_distribution() -> Option<DistributionKind> {
-    let root = current_app_root().ok()?;
-    distribution_at(&root)
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        return crate::macos_update::current_bundle().ok().map(|_| DistributionKind::MacosApp);
+    }
+    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    {
+        let root = current_app_root().ok()?;
+        distribution_at(&root)
+    }
 }
 
 fn distribution_at(root: &Path) -> Option<DistributionKind> {
@@ -172,7 +181,8 @@ fn distribution_at(root: &Path) -> Option<DistributionKind> {
 }
 
 pub fn update_supported() -> bool {
-    cfg!(windows) && is_official_build() && current_distribution().is_some()
+    cfg!(any(windows, all(target_os = "macos", target_arch = "aarch64")))
+        && is_official_build() && current_distribution().is_some()
 }
 
 pub async fn check(
@@ -185,10 +195,17 @@ pub async fn check(
         return Ok(None);
     };
     let update = check_sources(app, channel, endpoint_override, source).await?;
+    #[cfg(target_os = "macos")]
+    let installation_error = crate::macos_update::current_bundle()
+        .and_then(|bundle| crate::macos_update::check_location(&bundle))
+        .and_then(|_| update.as_ref().map_or(Ok(()), |checked| crate::macos_update::check_runtime_contract(app, &checked.update.raw_json)))
+        .err().map(|e| e.to_string());
+    #[cfg(not(target_os = "macos"))]
+    let installation_error: Option<String> = None;
     Ok(update.map(|checked| {
         let update = checked.update;
-        let auto_update_supported = update_auto_install_supported(&update.raw_json);
-        let requires_manual_install = update_requires_manual_install(&update.raw_json);
+        let auto_update_supported = installation_error.is_none() && update_auto_install_supported(&update.raw_json);
+        let requires_manual_install = installation_error.is_some() || update_requires_manual_install(&update.raw_json);
         let manual_install_url = if checked.provider == UpdateProvider::Modelscope {
             update_sources::release_page(&update.version)
         } else {
@@ -203,7 +220,9 @@ pub async fn check(
             distribution,
             auto_update_supported,
             requires_manual_install,
-            update_message: if requires_manual_install {
+            update_message: if installation_error.is_some() {
+                installation_error.clone()
+            } else if requires_manual_install {
                 Some(update_manual_install_message(&update.raw_json))
             } else {
                 update.raw_json
@@ -241,26 +260,34 @@ pub async fn start(
         return Err(AppError::Worker("The available update changed. Check for updates again before installing.".into()));
     }
 
-    let candidates = download_candidates(&update.version, &update.download_url, checked.provider, source)?;
-    let candidates = order_download_candidates(app, candidates).await?;
-    let mut last_error = None;
-    for (index, (provider, download_url)) in candidates.into_iter().enumerate() {
-        let _ = app.emit(UPDATE_EVENT, serde_json::json!({
-            "event": "SourceSelected", "data": { "source": provider, "fallback": index > 0 },
-        }));
-        let mut candidate = update.clone();
-        candidate.download_url = download_url;
-        match download_archive(app, &candidate).await {
-            Ok(bytes) => {
-                let root = current_app_root()?;
-                return stage_update(&root, &update.version, &update.signature, &bytes);
-            }
-            Err(error) => last_error = Some(error),
-        }
+    #[cfg(target_os = "macos")]
+    {
+        return crate::macos_update::start(app, &update, checked.provider, source).await;
     }
-    Err(last_error.unwrap_or_else(|| AppError::Worker("No update download source is available".into())))
+    #[cfg(not(target_os = "macos"))]
+    {
+        let candidates = download_candidates(&update.version, &update.download_url, checked.provider, source)?;
+        let candidates = order_download_candidates(app, candidates).await?;
+        let mut last_error = None;
+        for (index, (provider, download_url)) in candidates.into_iter().enumerate() {
+            let _ = app.emit(UPDATE_EVENT, serde_json::json!({
+                "event": "SourceSelected", "data": { "source": provider, "fallback": index > 0 },
+            }));
+            let mut candidate = update.clone();
+            candidate.download_url = download_url;
+            match download_archive(app, &candidate).await {
+                Ok(bytes) => {
+                    let root = current_app_root()?;
+                    return stage_update(&root, &update.version, &update.signature, &bytes);
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| AppError::Worker("No update download source is available".into())))
+    }
 }
 
+#[cfg(not(target_os = "macos"))]
 async fn download_archive(app: &AppHandle, update: &Update) -> AppResult<Vec<u8>> {
     let mut emitted_start = false;
     let mut downloaded_bytes = 0_u64;
@@ -341,7 +368,7 @@ async fn check_sources(
             let started = Instant::now();
             let checked = if provider == UpdateProvider::Modelscope {
                 let client = source_client(&app)?;
-                let filename = format!("{}-{UPDATE_GENERATION}-windows-x64-update.json", channel.endpoint_name());
+                let filename = update_sources::metadata_name(channel.endpoint_name(), UPDATE_GENERATION);
                 let manifest = update_sources::modelscope_manifest(&client, &filename).await?;
                 check_endpoint(&app, manifest.endpoint, channel, provider, Some(&manifest.version)).await?
             } else {
@@ -420,7 +447,7 @@ fn validate_update_channel(channel: UpdateChannel, version: &str, raw_json: &ser
     Ok(())
 }
 
-fn download_candidates(version: &str, original: &Url, provider: UpdateProvider, source: UpdateSource) -> AppResult<Vec<(UpdateProvider, Url)>> {
+pub(crate) fn download_candidates(version: &str, original: &Url, provider: UpdateProvider, source: UpdateSource) -> AppResult<Vec<(UpdateProvider, Url)>> {
     if provider == UpdateProvider::Custom {
         return Ok(vec![(provider, original.clone())]);
     }
@@ -436,7 +463,7 @@ fn download_candidates(version: &str, original: &Url, provider: UpdateProvider, 
     Ok(candidates)
 }
 
-async fn order_download_candidates(app: &AppHandle, candidates: Vec<(UpdateProvider, Url)>) -> AppResult<Vec<(UpdateProvider, Url)>> {
+pub(crate) async fn order_download_candidates(app: &AppHandle, candidates: Vec<(UpdateProvider, Url)>) -> AppResult<Vec<(UpdateProvider, Url)>> {
     if candidates.len() < 2 { return Ok(candidates); }
     let client = source_client(app)?;
     let mut probes = Vec::new();
@@ -573,7 +600,7 @@ fn cleanup_prepared_transaction(root: &Path, backup: &Path) -> AppResult<()> {
 }
 
 fn managed_endpoint(channel: UpdateChannel) -> Url {
-    Url::parse(&format!("{UPDATE_ROOT}/{}-{UPDATE_GENERATION}-windows-x64-update.json", channel.endpoint_name()))
+    Url::parse(&format!("{UPDATE_ROOT}/{}", update_sources::metadata_name(channel.endpoint_name(), UPDATE_GENERATION)))
         .expect("managed update endpoint is valid")
 }
 
@@ -633,14 +660,14 @@ fn source_client(app: &AppHandle) -> AppResult<reqwest::Client> {
         .map_err(|error| AppError::Worker(error.to_string()))
 }
 
-fn configure_update_client(client: reqwest::ClientBuilder, direct: bool, proxy: Option<Proxy>) -> reqwest::ClientBuilder {
+pub(crate) fn configure_update_client(client: reqwest::ClientBuilder, direct: bool, proxy: Option<Proxy>) -> reqwest::ClientBuilder {
     let client = configure_updater_client_timeouts(client);
     if direct { client.no_proxy() }
     else if let Some(proxy) = proxy { client.proxy(proxy) }
     else { client }
 }
 
-fn updater_proxy(app: &AppHandle) -> AppResult<(bool, Option<Proxy>)> {
+pub(crate) fn updater_proxy(app: &AppHandle) -> AppResult<(bool, Option<Proxy>)> {
     let Some(state) = app.try_state::<AppState>() else {
         return Ok((false, None));
     };
@@ -1275,7 +1302,7 @@ fn validate_backup_path(root: &Path, backup: &Path) -> AppResult<()> {
     Ok(())
 }
 
-fn decode_release_signature(release_signature: &str, version: &str) -> AppResult<Signature> {
+pub(crate) fn decode_release_signature(release_signature: &str, version: &str) -> AppResult<Signature> {
     validate_update_version(version)?;
     let signature = base64::engine::general_purpose::STANDARD.decode(release_signature)
         .map_err(|error| AppError::Worker(format!("Invalid update signature: {error}")))?;
@@ -1291,7 +1318,7 @@ fn decode_release_signature(release_signature: &str, version: &str) -> AppResult
     Ok(signature)
 }
 
-fn verify_payload_signature(payload: &[u8], release_signature: &str, version: &str) -> AppResult<()> {
+pub(crate) fn update_public_key() -> AppResult<PublicKey> {
     let public_key = base64::engine::general_purpose::STANDARD
         .decode(UPDATE_PUBLIC_KEY)
         .map_err(|error| AppError::Worker(format!("Invalid embedded update public key: {error}")))?;
@@ -1299,6 +1326,11 @@ fn verify_payload_signature(payload: &[u8], release_signature: &str, version: &s
         .map_err(|error| AppError::Worker(format!("Invalid embedded update public key: {error}")))?;
     let public_key = PublicKey::decode(&public_key)
         .map_err(|error| AppError::Worker(format!("Invalid update public key: {error}")))?;
+    Ok(public_key)
+}
+
+pub(crate) fn verify_payload_signature(payload: &[u8], release_signature: &str, version: &str) -> AppResult<()> {
+    let public_key = update_public_key()?;
     let signature = decode_release_signature(release_signature, version)?;
     public_key
         .verify(payload, &signature, true)
@@ -1713,7 +1745,7 @@ mod tests {
     fn managed_updates_use_the_v1_endpoint() {
         assert_eq!(
             managed_endpoint(UpdateChannel::Stable).as_str(),
-            "https://github.com/pymss-project/pymss-studio/releases/download/updater/stable-v1-windows-x64-update.json",
+            format!("https://github.com/pymss-project/pymss-studio/releases/download/updater/{}", crate::update_sources::metadata_name("stable", "v1")),
         );
     }
 
@@ -1773,7 +1805,9 @@ mod tests {
     #[test]
     fn release_signature_cannot_be_reused_for_another_version() {
         let signature = "untrusted comment: signature from tauri secret key\nRUSwXCRg9i11qZVeGcC91Q+ga6LNd9cnA5apzJD88EF9u5pWcmzJSRISDih2gqePAAT6XxRH4N73pv9RKnYnQ8E4Pca958Nf+Ag=\ntrusted comment: timestamp:1792132803\tfile:Pymss-Studio-0.0.20-windows-x64-update.zip\nKgHDaCK/VlKdFjhEV5Z/G+YmfoHBwkhRzSiwXXh/ZCcxmp6BDLxEw/9MucO2waR2s2FWAUa+0h1isXVdymJHBw==\n";
-        let encoded = base64::engine::general_purpose::STANDARD.encode(signature);
+        // This test checks filename binding before cryptographic verification.
+        let signature = signature.replace("Pymss-Studio-0.0.20-windows-x64-update.zip", &crate::update_sources::archive_name("0.0.20"));
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&signature);
         assert!(super::decode_release_signature(&encoded, "0.0.20").is_ok());
         assert!(super::decode_release_signature(&encoded, "99.0.0").is_err());
         let duplicate = signature.replace("\nKgHD", "\tfile:Pymss-Studio-0.0.20-windows-x64-update.zip\nKgHD");
@@ -1783,7 +1817,7 @@ mod tests {
     #[test]
     fn automatic_download_fallbacks_keep_the_same_release_and_explicit_sources_stay_explicit() {
         use crate::update_sources::{UpdateProvider, UpdateSource};
-        let original = url::Url::parse("https://github.com/pymss-project/pymss-studio/releases/download/v0.0.20/Pymss-Studio-0.0.20-windows-x64-update.zip").unwrap();
+        let original = url::Url::parse(&format!("https://github.com/pymss-project/pymss-studio/releases/download/v0.0.20/{}", crate::update_sources::archive_name("0.0.20"))).unwrap();
         let candidates = super::download_candidates("0.0.20", &original, UpdateProvider::Github, UpdateSource::Auto).unwrap();
         assert_eq!(candidates.len(), 2);
         assert_eq!(candidates[0], (UpdateProvider::Github, original.clone()));

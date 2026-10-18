@@ -14,6 +14,18 @@ const CATALOG_PAGE_SIZE: usize = 200;
 const MAX_CATALOG_PAGES: usize = 20;
 const MAX_CATALOG_PAGE_BYTES: usize = 1024 * 1024;
 
+pub fn platform_slug() -> &'static str {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "macos-arm64"
+    } else {
+        "windows-x64"
+    }
+}
+
+pub fn metadata_name(channel: &str, generation: &str) -> String {
+    format!("{channel}-{generation}-{}-update.json", platform_slug())
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateSource {
@@ -154,7 +166,12 @@ fn latest_mirror_manifest(paths: &HashSet<String>, filename: &str) -> Option<Mir
             }
             let version = Version::parse(folder).ok()?;
             // A partially uploaded release must not advertise an unavailable update archive.
-            if !paths.contains(&format!("{folder}/{}", archive_name(folder))) {
+            let archive = if filename.ends_with("-macos-arm64-update.json") {
+                archive_name_for(folder, "macos-arm64")
+            } else {
+                archive_name_for(folder, "windows-x64")
+            };
+            if !paths.contains(&format!("{folder}/{archive}")) {
                 return None;
             }
             Some((version, folder))
@@ -167,7 +184,15 @@ fn latest_mirror_manifest(paths: &HashSet<String>, filename: &str) -> Option<Mir
 }
 
 pub fn archive_name(version: &str) -> String {
-    format!("Pymss-Studio-{version}-windows-x64-update.zip")
+    archive_name_for(version, platform_slug())
+}
+
+fn archive_name_for(version: &str, platform: &str) -> String {
+    if platform == "macos-arm64" {
+        format!("Pymss-Studio-{version}-macos-arm64-update.app.tar.gz")
+    } else {
+        format!("Pymss-Studio-{version}-windows-x64-update.zip")
+    }
 }
 
 fn mirror_url(version: &str, filename: &str) -> Url {
@@ -189,8 +214,12 @@ pub fn release_page(version: &str) -> Option<String> {
 }
 
 pub fn archive_url(original: &Url, version: &str, provider: UpdateProvider) -> Option<Url> {
+    archive_url_for(original, version, provider, platform_slug())
+}
+
+fn archive_url_for(original: &Url, version: &str, provider: UpdateProvider, platform: &str) -> Option<Url> {
     Version::parse(version).ok()?;
-    let filename = archive_name(version);
+    let filename = archive_name_for(version, platform);
     let github = Url::parse(&format!("{GITHUB_ROOT}/v{version}/{filename}")).ok()?;
     let github_without_v = Url::parse(&format!("{GITHUB_ROOT}/{version}/{filename}")).ok()?;
     let mirror = mirror_url(version, &filename);
@@ -211,6 +240,22 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn macos_update_sources_require_the_matching_archive_and_architecture() {
+        let files = paths(&[
+            "1.0.0/stable-v1-macos-arm64-update.json",
+            "1.0.0/Pymss-Studio-1.0.0-macos-arm64-update.app.tar.gz",
+            "2.0.0/stable-v1-macos-arm64-update.json",
+            "2.0.0/Pymss-Studio-2.0.0-windows-x64-update.zip",
+        ]);
+        assert_eq!(latest_mirror_manifest(&files, "stable-v1-macos-arm64-update.json").unwrap().version, "1.0.0");
+        let github = Url::parse("https://github.com/pymss-project/pymss-studio/releases/download/v1.0.0/Pymss-Studio-1.0.0-macos-arm64-update.app.tar.gz").unwrap();
+        let mirror = archive_url_for(&github, "1.0.0", UpdateProvider::Modelscope, "macos-arm64").unwrap();
+        assert!(mirror.path().ends_with("/1.0.0/Pymss-Studio-1.0.0-macos-arm64-update.app.tar.gz"));
+        assert!(archive_url_for(&github, "1.0.0", UpdateProvider::Github, "windows-x64").is_none());
+        assert!(archive_url_for(&github, "2.0.0", UpdateProvider::Github, "macos-arm64").is_none());
+    }
 
     fn paths(values: &[&str]) -> HashSet<String> {
         values.iter().map(|value| value.to_string()).collect()
@@ -260,6 +305,9 @@ mod tests {
 
     #[test]
     fn only_the_official_archive_for_the_same_version_is_mirrored() {
+        let archive_url = |original: &Url, version: &str, provider| {
+            archive_url_for(original, version, provider, "windows-x64")
+        };
         let github = Url::parse("https://github.com/pymss-project/pymss-studio/releases/download/v0.0.20/Pymss-Studio-0.0.20-windows-x64-update.zip").unwrap();
         let mirror = archive_url(&github, "0.0.20", UpdateProvider::Modelscope).unwrap();
         assert!(mirror

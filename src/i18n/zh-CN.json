@@ -1130,7 +1130,7 @@
     "updateCheckFailed": "检查更新失败",
     "updateNeverChecked": "从未检查",
     "updateStatusHint": "应用更新会保留当前运行环境、模型和用户数据。",
-    "updateUnsupportedHint": "自动更新仅适用于受管理的 Windows 安装或便携目录。",
+    "updateUnsupportedHint": "自动更新适用于官方 Windows 安装、便携目录及 Apple Silicon macOS 应用。",
     "updateManualInstallTitle": "需要手动安装",
     "updateManualInstallPrompt": "版本 {version} 包含无法通过应用内更新安全处理的变更，请从下载页面获取安装包并重新安装。",
     "updateOpenRelease": "打开下载页面",

@@ -638,6 +638,7 @@ def _probe_environment(overlay_path: Path | None = None, *, python_path: Path | 
     if sys.platform == "darwin" and python_path and _is_bundled_bootstrap_python(python_path):
         env["PYTHONHOME"] = str(BUNDLED_RUNTIME_ENVS_DIR.parent)
     env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     if overlay_path:
         env["PYTHONPATH"] = str(overlay_path)
     else:

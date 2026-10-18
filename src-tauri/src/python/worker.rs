@@ -44,6 +44,26 @@ static PAYLOAD_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 // Core packages are updated in the active environment. Hold a shared lease for every worker
 // using that interpreter, and an exclusive lease for pip, including the process-start window.
 static RUNTIME_ACCESS: Mutex<RuntimeAccess> = Mutex::new(RuntimeAccess { users: 0, updating: false });
+// Application replacement also excludes bootstrap workers, which can otherwise keep
+// importing modules from the old bundle while its directory is being replaced.
+static APPLICATION_ACCESS: Mutex<RuntimeAccess> = Mutex::new(RuntimeAccess { users: 0, updating: false });
+
+#[cfg(target_os = "macos")]
+pub(crate) fn acquire_application_update() -> AppResult<impl Drop> {
+    acquire_runtime_access(&APPLICATION_ACCESS, "update_runtime_core")
+        .map_err(|error| match error {
+            AppError::Worker(message) if message.starts_with("RUNTIME_BUSY:") => AppError::Worker(
+                "Wait for running audio and runtime operations to finish before updating the application.".into(),
+            ),
+            error => error,
+        })?
+        .ok_or_else(|| AppError::Worker("Unable to reserve the application for updating".into()))
+}
+
+fn acquire_application_operation() -> AppResult<Option<RuntimeAccessGuard<'static>>> {
+    acquire_runtime_access(&APPLICATION_ACCESS, "application_operation")
+        .map_err(|_| AppError::Worker("An application update is in progress. Wait for it to finish before starting another operation.".into()))
+}
 
 #[derive(Default)]
 struct RuntimeAccess {
@@ -1050,6 +1070,7 @@ pub fn run_worker_with_payload(
     command: &str,
     payload: Option<Value>,
 ) -> AppResult<Value> {
+    let _application_access = acquire_application_operation()?;
     let _runtime_access = acquire_runtime_access(&RUNTIME_ACCESS, command)?;
     let payload_summary = payload.as_ref().map(summarize_payload).unwrap_or_else(|| "none".to_string());
     session_log::append(
@@ -1190,6 +1211,7 @@ pub fn spawn_worker_background(
     task_id: String,
     payload: Value,
 ) -> AppResult<()> {
+    let mut application_access = acquire_application_operation()?;
     let mut runtime_access = acquire_runtime_access(&RUNTIME_ACCESS, command)?;
     let mut registered_task_ids = vec![task_id.clone()];
     if let Some(tasks) = payload.get("tasks").and_then(Value::as_array) {
@@ -1359,6 +1381,7 @@ pub fn spawn_worker_background(
             cleanup_editor_export_temp_files(directory, &task_id);
         }
         drop(runtime_access.take());
+        drop(application_access.take());
         // Finish Python cleanup before the terminal event starts the UI's environment refresh.
         if let Some(message) = core_terminal_error {
             emit_task_error_to_all(&app, &registered_task_ids, message);
@@ -1782,6 +1805,40 @@ mod tests {
             ),
             None,
         );
+    }
+
+    #[test]
+    fn bundled_bootstrap_uses_user_overlay_without_changing_bundle() {
+        let fixture = ResourceFixture::new("bundled-user-overlay");
+        let bundled = fixture.0.join("Installed.app/Contents/Resources/python-runtime");
+        let python = bundled.join("bin/python3");
+        fixture.file(&python);
+        let bundled_pointer = bundled.join("runtime-envs/active-runtime.json");
+        fs::create_dir_all(bundled_pointer.parent().unwrap()).unwrap();
+        let bundled_state = serde_json::to_vec(&json!({
+            "backend": "mlx", "source": "bundled", "pythonPath": "../bin/python3",
+        })).unwrap();
+        fs::write(&bundled_pointer, &bundled_state).unwrap();
+        let user_root = fixture.0.join("user/runtime-envs");
+        let overlay = user_root.join(".overlays/mlx/generation/site-packages");
+        fs::create_dir_all(&overlay).unwrap();
+        let user_pointer = user_root.join("active-runtime.json");
+        fs::write(&user_pointer, serde_json::to_vec(&json!({
+            "backend": "mlx", "source": "bundled", "pythonPath": python,
+            "overlayPath": overlay,
+        })).unwrap()).unwrap();
+        let active_python = super::resolve_active_runtime_record(&bundled_pointer).unwrap().0;
+        assert!(super::is_bundled_runtime_python_path(&bundled_pointer, &active_python).unwrap());
+        assert_eq!(super::resolve_runtime_overlay_for_record(
+            &user_pointer, &active_python, &[user_root.clone()],
+        ), Some(overlay.canonicalize().unwrap()));
+        fs::write(&user_pointer, serde_json::to_vec(&json!({
+            "backend": "mlx", "source": "bundled", "pythonPath": python,
+        })).unwrap()).unwrap();
+        assert_eq!(super::resolve_runtime_overlay_for_record(
+            &user_pointer, &active_python, &[user_root],
+        ), None);
+        assert_eq!(fs::read(bundled_pointer).unwrap(), bundled_state);
     }
 
     #[test]

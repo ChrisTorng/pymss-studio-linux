@@ -34,6 +34,18 @@ windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_Securit
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"
+sha2 = "0.10"
+
+[dev-dependencies]
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"
+sha2 = "0.10"
+
 # Keep line-level debugging for application code while avoiding oversized MSVC
 # program databases generated from the complete Tauri dependency graph.
 [profile.dev]
