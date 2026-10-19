@@ -139,6 +139,16 @@ PyTorch 2.7.1+cu128 and preserved the user's pymss 2.1.9 core overlay. No second
 or CUDA runtime reinstall was needed. Existing app installations need the newer DEB to
 retain this fix for future component installation/removal.
 
+### FunASR verification — 2026-10-19
+
+- Fixed source: [`4f7e84c`](https://github.com/ChrisTorng/pymss-studio-linux/commit/4f7e84c9089974f2081c89e082ed98a40187fac0), package **`0.0.21-6`**. [Actions run 39273004173](https://github.com/ChrisTorng/pymss-studio-linux/actions/runs/39273004173) passed the symlinked-venv regression tests, Ubuntu 22.04 build and Ubuntu 22.04/24.04/26.04 installation checks.
+- DEB SHA256: `18a486e95f0ba1a2d7665e10e20ff515da9bca2dd16ebf2c04573271d7ad365f`.
+- Actual host installation of the optional component succeeded; repeated installation using the new DEB's worker returned `installed: true` without another download. The base Torch package remained in the existing CUDA venv.
+- The installed application worker transcribed the [official SenseVoice Chinese example](https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/example/zh.mp3) using SenseVoiceSmall plus FSMN VAD. Result: `开放时间早上9点至下午5点。` TXT and JSON were written successfully. A second run checked that actual model parameters were on `cuda:0` on the RTX 4090, rather than relying on CUDA availability alone.
+- This SenseVoice test returned no sentence timestamps; the worker reported `timestamps_unavailable` and omitted SRT. It does not establish timestamp support for other ASR presets.
+- SenseVoice model weights downloaded from the [official Hugging Face mirror](https://huggingface.co/FunAudioLLM/SenseVoiceSmall) matched its LFS SHA256 `833ca2dcfdf8ec91bd4f31cfac36d6124e0c459074d5e909aec9cabe6204a3ea`.
+- GUI button rendering was not directly verified in the user's existing desktop session, where accessibility was disabled. The formal worker status and full recognition path passed; Refresh uses that status query.
+
 ## Local source build (developers)
 
 On Ubuntu, install [Tauri 2 Linux prerequisites](https://v2.tauri.app/start/prerequisites/) plus Node.js 22, pnpm 10.33.2, Rust stable, and Python 3.12. For a normal developer build, see the [upstream README](https://github.com/pymss-project/pymss-studio#development-and-verification). The release workflow handles portable-Python staging; `pnpm tauri build --bundles deb` alone does **not** reproduce its runtime bundle.
