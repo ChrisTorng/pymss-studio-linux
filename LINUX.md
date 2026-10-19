@@ -147,7 +147,7 @@ retain this fix for future component installation/removal.
 - The installed application worker transcribed the [official SenseVoice Chinese example](https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/master/example/zh.mp3) using SenseVoiceSmall plus FSMN VAD. Result: `开放时间早上9点至下午5点。` TXT and JSON were written successfully. A second run checked that actual model parameters were on `cuda:0` on the RTX 4090, rather than relying on CUDA availability alone.
 - This SenseVoice test returned no sentence timestamps; the worker reported `timestamps_unavailable` and omitted SRT. It does not establish timestamp support for other ASR presets.
 - SenseVoice model weights downloaded from the [official Hugging Face mirror](https://huggingface.co/FunAudioLLM/SenseVoiceSmall) matched its LFS SHA256 `833ca2dcfdf8ec91bd4f31cfac36d6124e0c459074d5e909aec9cabe6204a3ea`.
-- GUI button rendering was not directly verified in the user's existing desktop session, where accessibility was disabled. The formal worker status and full recognition path passed; Refresh uses that status query.
+- The host was subsequently confirmed upgraded to `0.0.21-6`; its installed optional-package worker matched the verified DEB and returned `installed: true`. A screenshot of the reopened GUI showed the user's Paraformer Chinese Standard transcription task starting its first model download. That user task was left running; its completion is not part of the SenseVoice validation above. Exact component-button rendering was not inspected because the existing desktop session had accessibility disabled.
 
 ## Local source build (developers)
 
