@@ -117,6 +117,28 @@ The Linux preparation script adds a single Linux guard to `src/utils/theme.ts` *
 
 The Linux preparation script also injects `scripts/linux-media-compat.js` into the transient frontend entry point. This works around WebKitGTK's inability to play local Tauri `asset:` audio URLs ([Tauri #8654](https://github.com/tauri-apps/tauri/issues/8654)). Normal playback is attempted first; only a local-asset `NotSupportedError` triggers a fetch-to-Blob fallback. Owned Blob URLs and pending reads are released when the existing preview cache removes or replaces the source. Other platforms and ordinary HTTP/Blob sources keep their normal behavior. A selected preview is held in memory until released; this is not a streaming server.
 
+## FunASR optional component on Linux
+
+The Linux resource overlay in `scripts/linux-optional-packages-compat.py` preserves the
+venv's absolute interpreter path when optional components launch Python subprocesses.
+Resolving a Linux venv's `bin/python` symlink selects the shared bootstrap interpreter
+instead, so the original installer could download FunASR dependencies and then incorrectly
+report **“The active runtime does not include PyTorch”**. Refresh only rechecks availability;
+the failed staged installation was correctly discarded, which explains the Install button
+returning after Refresh.
+
+The overlay changes three executable-path expressions in the bundled resource copy only.
+Tracked upstream Python files remain unchanged. The build fails for review if upstream
+changes these expressions. CI exercises real symlinked CPU/CUDA venvs, independent runtime
+identities, metadata discovery and compatible-torchaudio selection without downloading Torch.
+
+On the Ubuntu 26.04.1 / RTX 4090 validation host, the fixed worker installed FunASR 1.3.26
+and torchaudio 2.7.1+cu128 into the managed optional sidecar. The formally installed worker's
+status query then returned `installed: true`. Deep imports used the existing CUDA venv's
+PyTorch 2.7.1+cu128 and preserved the user's pymss 2.1.9 core overlay. No second Torch copy
+or CUDA runtime reinstall was needed. Existing app installations need the newer DEB to
+retain this fix for future component installation/removal.
+
 ## Local source build (developers)
 
 On Ubuntu, install [Tauri 2 Linux prerequisites](https://v2.tauri.app/start/prerequisites/) plus Node.js 22, pnpm 10.33.2, Rust stable, and Python 3.12. For a normal developer build, see the [upstream README](https://github.com/pymss-project/pymss-studio#development-and-verification). The release workflow handles portable-Python staging; `pnpm tauri build --bundles deb` alone does **not** reproduce its runtime bundle.

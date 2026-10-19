@@ -81,6 +81,7 @@ jobs:
         run: |
           node --check scripts/linux-media-compat.js
           node scripts/test-linux-media-compat.mjs
+          python3 scripts/test-linux-optional-packages.py
           bash scripts/prepare-linux-bundle.sh "${{ steps.version.outputs.version }}"
 
       - name: Verify Linux CPU and CUDA manifest

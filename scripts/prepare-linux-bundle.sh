@@ -29,6 +29,7 @@ mkdir -p "$RESOURCES/python"
 cp -a "$ROOT/python/." "$RESOURCES/python/"
 find "$RESOURCES/python" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$RESOURCES/python" -type f -name '*.pyc' -delete
+python3 "$ROOT/scripts/linux-optional-packages-compat.py" "$RESOURCES/python/worker_optional_packages.py"
 
 echo "Preparing relocatable Python $PBS_PYTHON_VERSION ($PBS_TAG)"
 curl --fail --location --retry 3 --retry-delay 3 --output "$TMP/python.tar.gz" "$URL"
