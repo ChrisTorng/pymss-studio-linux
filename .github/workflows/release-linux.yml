@@ -1,10 +1,10 @@
 name: Build Linux DEB
 
-# Main releases remain manual; the dedicated validation branch can test fixes.
+# Main releases remain manual; validation builds do not publish a release.
 # Upstream synchronization on main does not trigger a build.
 on:
   push:
-    branches: [linux-validation]
+    branches: [linux-validation, linux-release]
   workflow_dispatch:
     inputs:
       version:
@@ -12,6 +12,11 @@ on:
         required: false
         default: ''
         type: string
+      publish:
+        description: 'Publish a Linux Release after every installation check passes'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -25,6 +30,21 @@ jobs:
     name: Build one Ubuntu 22.04 baseline .deb
     runs-on: ubuntu-22.04
     timeout-minutes: 120
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      package_version: ${{ steps.version.outputs.package_version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+    env:
+      PYMSS_BUILD_GIT_COMMIT: ${{ github.sha }}
+      PYMSS_BUILD_GIT_REF: ${{ github.ref_name }}
+      PYMSS_BUILD_RUN_ID: ${{ github.run_id }}
+      PYMSS_BUILD_RUN_ATTEMPT: ${{ github.run_attempt }}
+      PYMSS_BUILD_REPOSITORY: ${{ github.repository }}
+      PYMSS_BUILD_REPOSITORY_OWNER: ${{ github.repository_owner }}
+      PYMSS_BUILD_TARGET: linux-amd64
+      PYMSS_BUILD_VARIANT: linux-amd64-online
+      PYMSS_BUILD_UPDATE_SUPPORTED: 'false'
+      PYMSS_BUILD_OFFICIAL: 'false'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,7 +60,7 @@ jobs:
           set -euo pipefail
           version="$INPUT_VERSION"
           if [[ -z "$version" ]]; then
-            version="$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)"
+            version="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' 2>/dev/null || true)"
           fi
           version="${version#v}"
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -48,6 +68,11 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "package_version=$version-$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "release_tag=v$version-linux.$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "PYMSS_BUILD_PACKAGE_VERSION=$version-$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "PYMSS_BUILD_GIT_TAG=v$version-linux.$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "PYMSS_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
           echo "Building $version from commit $GITHUB_SHA"
 
       - name: Install Tauri 2 build prerequisites
@@ -82,6 +107,7 @@ jobs:
           node --check scripts/linux-media-compat.js
           node scripts/test-linux-media-compat.mjs
           python3 scripts/test-linux-optional-packages.py
+          python3 scripts/test-linux-release-compat.py
           bash scripts/prepare-linux-bundle.sh "${{ steps.version.outputs.version }}"
 
       - name: Verify Linux CPU and CUDA manifest
@@ -109,13 +135,14 @@ jobs:
           mkdir -p package
           bash -n scripts/prepare-linux-bundle.sh scripts/finalize-linux-deb.sh scripts/install-linux-deb.sh scripts/setup-linux-runtime.sh
           install -m 0644 scripts/install-linux-deb.sh scripts/setup-linux-runtime.sh package/
+          install -m 0644 src-tauri/resources/linux-build-info.json package/BUILD-INFO.json
           input_deb="$(find src-tauri/target/release/bundle/deb -maxdepth 1 -name '*.deb' -type f)"
           test -f "$input_deb"
           bash scripts/finalize-linux-deb.sh "$input_deb" package "${{ steps.version.outputs.version }}" "$GITHUB_RUN_NUMBER"
           test "$(find package -maxdepth 1 -name '*.deb' | wc -l)" -eq 1
           dpkg-deb --info package/*.deb
           dpkg-deb --contents package/*.deb | grep -E 'python-runtime/bin/python3|python/worker.py'
-          (cd package && sha256sum *.deb install-linux-deb.sh setup-linux-runtime.sh > SHA256SUMS)
+          (cd package && sha256sum *.deb install-linux-deb.sh setup-linux-runtime.sh BUILD-INFO.json > SHA256SUMS)
           ls -lh package/
 
       - uses: actions/upload-artifact@v4
@@ -157,6 +184,18 @@ jobs:
           py="$(dpkg -L pymss-studio | grep -E '/python-runtime/bin/python3$' | head -n1)"
           test -n "$py" && test -x "$py"
           PYTHONDONTWRITEBYTECODE=1 "$py" -c 'import sys, requests, socks; assert sys.version_info[:2] == (3, 12); print(sys.version)'
+          cmp package/BUILD-INFO.json "$(dirname "$(dirname "$py")")/../linux-build-info.json"
+          python3 - <<'PY'
+          import json, subprocess
+          info = json.load(open("package/BUILD-INFO.json"))
+          version = subprocess.check_output(["dpkg-query", "--show", "--showformat=${Version}", "pymss-studio"], text=True)
+          assert info["packageVersion"] == version
+          assert info["repository"] == "${{ github.repository }}"
+          assert info["gitCommit"] == "${{ github.sha }}"
+          assert info["runId"] == "${{ github.run_id }}"
+          assert info["official"] is False and info["updateSupported"] is False
+          print("Installed package provenance:", info)
+          PY
           command -v ffmpeg
           command -v ffprobe
           command -v aria2c
@@ -167,3 +206,58 @@ jobs:
             exit 1
           fi
           echo "APT and native-link smoke checks passed: $(lsb_release -ds)"
+
+  publish:
+    name: Publish verified Linux Release
+    needs: [build, install-smoke]
+    if: github.repository == 'ChrisTorng/pymss-studio-linux' && (github.ref == 'refs/heads/linux-release' || inputs.publish == true)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pymss-studio-linux-amd64
+          path: package
+      - name: Verify release assets
+        run: cd package && sha256sum --check SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          name: Pymss Studio Linux ${{ needs.build.outputs.package_version }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: true
+          overwrite_files: false
+          body: |
+            Linux fork package **${{ needs.build.outputs.package_version }}**, based on upstream Pymss Studio **${{ needs.build.outputs.version }}**.
+
+            This is a third-party Linux build from ChrisTorng/pymss-studio-linux, not an upstream official release. Linux application updates use manual DEB installation.
+
+            ### Changes
+            - About now shows the Linux package revision and real CI build fingerprint, repository, commit and run.
+            - The download button opens this fork's Releases; upstream project and license links remain attributed to upstream.
+            - Includes the existing FunASR venv, WebKitGTK onboarding and audio-preview compatibility fixes.
+
+            ### Installation
+            Download the DEB and install-linux-deb.sh into the same directory, then run:
+            ```bash
+            bash ./install-linux-deb.sh ./pymss-studio_${{ needs.build.outputs.package_version }}_amd64.deb
+            ```
+            On a first installation, configure the NVIDIA runtime with `bash ./setup-linux-runtime.sh cuda` (or `cpu`). An existing configured runtime is retained when upgrading the DEB.
+
+            ### Verification and scope
+            Built on Ubuntu 22.04; package installation, bundled Python, native-library and provenance checks passed on Ubuntu 22.04, 24.04 and 26.04. These CI runners do not verify GPU inference or every application feature. Previous real RTX 4090 / CUDA 12.8 separation and FunASR validation is recorded in LINUX.md.
+
+            Source: ${{ github.sha }}
+            Build: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            BUILD-INFO.json records provenance; SHA256SUMS covers the DEB, scripts and metadata. See https://github.com/${{ github.repository }}/blob/${{ github.sha }}/LINUX.md for requirements and known limits.
+          files: |
+            package/*.deb
+            package/install-linux-deb.sh
+            package/setup-linux-runtime.sh
+            package/BUILD-INFO.json
+            package/SHA256SUMS

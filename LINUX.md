@@ -12,12 +12,24 @@ This is an **unofficial, packaging-only** fork of [pymss-project/pymss-studio](h
 
 ## Download / build in GitHub Actions
 
+For installation, use the [latest Linux Release](https://github.com/ChrisTorng/pymss-studio-linux/releases/latest).
+Download the `.deb`, `install-linux-deb.sh`, `setup-linux-runtime.sh`, `BUILD-INFO.json`, and `SHA256SUMS`
+into the same directory. Releases retain the files independently of expiring Actions artifacts.
+Linux release tags use `vX.Y.Z-linux.N`; the DEB and About page show `X.Y.Z-N`, while the
+underlying application version remains upstream `X.Y.Z`.
+
 1. Open [**Actions → Build Linux DEB**](https://github.com/ChrisTorng/pymss-studio-linux/actions/workflows/release-linux.yml) and choose **Run workflow** on `main`.
 2. Leave the version override blank to derive the package version from the latest reachable upstream-style `vX.Y.Z` Git tag, or provide a specific `X.Y.Z` override when building a known release.
 3. The build job creates **one** `.deb`. CI then attempts installation and bundled-Python smoke tests in three Ubuntu environments.
-4. When the workflow completes, open the run and download the **`pymss-studio-linux-amd64`** artifact ZIP. Unzip it to get the `.deb`, `install-linux-deb.sh`, `setup-linux-runtime.sh`, and `SHA256SUMS` (older artifacts contain only the DEB and checksums). Do not treat a failed validation job as a verified release.
+4. When the workflow completes, open the run and download the **`pymss-studio-linux-amd64`** artifact ZIP. Unzip it to get the package, helper scripts, provenance and checksums. Enable the **publish** input to create a Release only after all three OS checks pass. Do not treat a failed validation job as a verified release.
 
-Builds on `main` are **manual** (`workflow_dispatch`), so syncing upstream does not automatically rebuild Linux packages or create duplicate releases. Pushes to the dedicated `linux-validation` branch run the same pipeline for packaging fixes. Workflow artifacts expire according to the repository's GitHub Actions retention settings. They are not yet permanent GitHub Releases.
+Builds on `main` are **manual** (`workflow_dispatch`), so syncing upstream does not automatically rebuild Linux packages or create duplicate releases. Pushes to `linux-validation` build and test without publishing. The explicit `linux-release` branch builds, tests and publishes a stable Linux Release with its own tag and assets. Publishing is restricted to this fork and the publish job alone has `contents: write`. Linux revision tags are excluded when resolving the upstream base version for future builds.
+
+### About page and provenance
+
+Linux CI supplies the commit, tag, branch, run ID/attempt, repository, UTC build time and Linux online variant through upstream's existing build-information hooks. A guarded Linux-only resource overlay adds the Debian package version to the About response and redirects only release-download buttons to this fork. Upstream repository, credits and license links remain intact. About correctly identifies these packages as **third-party CI builds**; they are not labelled upstream official builds. Linux automatic application updates remain disabled, with an English/Chinese explanation of manual DEB updates.
+
+`BUILD-INFO.json` is included in both the Release assets and installed resources and is covered by `SHA256SUMS`. CI verifies that its package version, commit, repository and run match the installed DEB. The Worker version remains upstream's protocol version (`0.1.0`); it is separate from the app and the active `pymss` Python package version. Existing Python inference environments and their core overlays are retained when upgrading the desktop DEB.
 
 ## Install on Ubuntu 26.04 (also 22.04 / 24.04)
 

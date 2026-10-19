@@ -30,6 +30,7 @@ cp -a "$ROOT/python/." "$RESOURCES/python/"
 find "$RESOURCES/python" -type d -name __pycache__ -prune -exec rm -rf {} +
 find "$RESOURCES/python" -type f -name '*.pyc' -delete
 python3 "$ROOT/scripts/linux-optional-packages-compat.py" "$RESOURCES/python/worker_optional_packages.py"
+python3 "$ROOT/scripts/linux-release-compat.py" "$ROOT" "${PYMSS_BUILD_PACKAGE_VERSION:-$VERSION}" "${PYMSS_BUILD_REPOSITORY:-ChrisTorng/pymss-studio-linux}"
 
 echo "Preparing relocatable Python $PBS_PYTHON_VERSION ($PBS_TAG)"
 curl --fail --location --retry 3 --retry-delay 3 --output "$TMP/python.tar.gz" "$URL"
@@ -109,6 +110,7 @@ config = {
         "resources": {
             str((resources / "python").resolve()): "python",
             str((resources / "python-runtime").resolve()): "python-runtime",
+            str((resources / "linux-build-info.json").resolve()): "linux-build-info.json",
         },
         "linux": {
             "deb": {
