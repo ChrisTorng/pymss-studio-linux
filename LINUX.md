@@ -189,6 +189,16 @@ Validated package: **`0.0.21-5`**, upstream app version **`0.0.21`**, source com
 
 This verifies the tested model and host. It does not establish desktop/GPU support on every matrix OS, certify all separation models, or measure separation quality against reference stems.
 
+## Release and About verification — 2026-10-20
+
+- Published [v0.0.21-linux.7](https://github.com/ChrisTorng/pymss-studio-linux/releases/tag/v0.0.21-linux.7), package `0.0.21-7`, upstream base `0.0.21`, source [`243a19e`](https://github.com/ChrisTorng/pymss-studio-linux/commit/243a19e43afa642c834cf0a47c22ee9897047f26).
+- [Actions run 39283022576](https://github.com/ChrisTorng/pymss-studio-linux/actions/runs/39283022576) completed the release overlay regression checks, Ubuntu 22.04 build and Ubuntu 22.04/24.04/26.04 installation/provenance checks before publishing. The job logs explicitly confirm successful native-link smoke checks on all three versions.
+- Release assets include the DEB, both installer/runtime helpers, `BUILD-INFO.json` and `SHA256SUMS`. The public `/releases/latest` resolves to this stable release. The release tag targets the build's source commit.
+- DEB SHA256: `7ae8032e72895cddf57b33a8464ead209776166a875b399e67e3b6241fe5132d`; the plugin-reported Release asset digest matches the downloaded and extracted artifact.
+- The actual DEB binary was run in a temporary isolated desktop with a private `/tmp`, application settings and XDG directories, preserving the user's existing app and CUDA environment. About showed `0.0.21-7`, **Third-party CI build**, and fingerprint `v0.0.21-linux.7 · 243a19e · linux-amd64-online · #39283022576.1 · ChrisTorng/pymss-studio-linux`.
+- Clicking the actual **Open GitHub download page** button invoked `https://github.com/ChrisTorng/pymss-studio-linux/releases/latest`. The isolated desktop recorded this system-open request without launching a browser in the user's active desktop.
+- This release validation covers the changed metadata, download link and packaging. It does not claim that every application function was retested. Inference validation from earlier revisions is documented separately above. The isolated GUI used separate runtime data, so its core-runtime availability was not a test of the user's configured environment.
+
 ## References
 
 - [Upstream Pymss Studio](https://github.com/pymss-project/pymss-studio)

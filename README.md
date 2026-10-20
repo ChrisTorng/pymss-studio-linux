@@ -7,7 +7,7 @@
 - **Scope:** Linux packaging and validation; upstream source files are preserved in Git. Guarded build-time overlays handle Linux compatibility, package provenance and the fork's download link (see LINUX.md).
 - **Runtime:** Run the artifact's `setup-linux-runtime.sh cuda` for NVIDIA, or `cpu`. The upstream Linux GUI runtime manager is currently read-only.
 - **Download:** [Latest Linux Release](https://github.com/ChrisTorng/pymss-studio-linux/releases/latest). Download the `.deb`, installer scripts and checksums. [Actions](https://github.com/ChrisTorng/pymss-studio-linux/actions/workflows/release-linux.yml) also retains validation artifacts.
-- **Verified:** `0.0.21-5` desktop separation/playback; `0.0.21-6` fixes FunASR installation, with real Chinese ASR on RTX 4090 / CUDA 12.8. See [Linux validation](LINUX.md).
+- **Verified:** `0.0.21-7` release/About metadata and download link; earlier desktop separation/playback and FunASR CUDA validation remain recorded in [LINUX.md](LINUX.md).
 - **Installation, runtime requirements, limitations, and troubleshooting:** [LINUX.md](LINUX.md).
 - **Upstream source/releases:** [pymss-project/pymss-studio](https://github.com/pymss-project/pymss-studio).
 
